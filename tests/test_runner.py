@@ -186,3 +186,42 @@ def test_keepouts_that_only_forbid_copper_pours_do_not_block_tracks(manifest):
         for obstacle in problem.obstacles:
             assert obstacle.blocks_tracks or obstacle.blocks_vias, \
                 f"{entry['name']}: obstacle that forbids nothing was still recorded"
+
+
+# --------------------------------------------------------------------------- S4
+
+def test_s4_is_registered_and_reproducible(small_problem):
+    first = strategy_mod.get("S4").route(small_problem, Random(3), Budget(120))
+    second = strategy_mod.get("S4").route(small_problem, Random(3), Budget(120))
+    assert first.items == second.items
+
+
+def test_s4_negotiates_the_clearance_envelope_not_bare_cells(small_problem):
+    """Regression: pricing bare cell centres let two nets sit in adjacent cells with zero
+    recorded contention while breaking clearance, and S4 lost to S1 because of it."""
+    from strategies.s4_pathfinder import CongestionGrid
+
+    grid = CongestionGrid(small_problem)
+    assert len(grid._envelope) > 1, "the negotiated resource must be wider than one cell"
+
+    node = (0, grid.nx // 2, grid.ny // 2)
+    grid.claim([node], net=1)
+    neighbour = (0, node[1] + 1, node[2])
+    assert grid.overuse(neighbour, net=2) == 1, \
+        "a neighbouring cell must register contention against a claimed track"
+
+
+def test_s4_records_its_convergence_history(small_problem):
+    solution = strategy_mod.get("S4").route(small_problem, Random(1), Budget(120))
+    history = solution.meta.get("iterations")
+    assert history, "S4 must record what happened each iteration"
+    assert {"iteration", "contested", "rerouted", "pres_factor"} <= set(history[0])
+    assert history[0]["contested"] >= 0
+    assert "converged" in solution.meta
+
+
+def test_s4_pressure_escalates(small_problem):
+    """Sharing must get monotonically more expensive, or nets never separate."""
+    solution = strategy_mod.get("S4").route(small_problem, Random(1), Budget(120))
+    factors = [h["pres_factor"] for h in solution.meta["iterations"]]
+    assert all(b >= a for a, b in zip(factors, factors[1:])), factors

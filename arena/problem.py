@@ -127,6 +127,25 @@ class Obstacle:
     blocks_vias: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class EdgePrimitive:
+    """One piece of the board outline, as a segment or a three-point arc.
+
+    Board-edge clearance has to be measured against the real outline. Using the bounding box
+    is exact only for rectangular boards and *optimistic* for every other shape -- it would
+    let copper run outside the board and call it legal, which is the one direction the
+    checker must never err in.
+    """
+
+    kind: str            # "segment" | "arc"
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    xm: int = 0
+    ym: int = 0
+
+
 @dataclass
 class Problem:
     """Everything a strategy is given, plus what emit.py needs to put the answer back."""
@@ -144,6 +163,7 @@ class Problem:
     source_path: Path
     project_path: Path | None
     net_names: dict[int, str] = field(default_factory=dict)
+    edges: tuple[EdgePrimitive, ...] = ()
 
     @property
     def layer_count(self) -> int:
@@ -328,6 +348,73 @@ def _obstacles(tree: Node) -> list[Obstacle]:
     return out
 
 
+def _edge_primitives(tree: Node) -> list[EdgePrimitive]:
+    """Every Edge.Cuts graphic, as segments and arcs.
+
+    Circles and rectangles are expanded into their constituent pieces so that downstream
+    code only ever sees two primitive kinds.
+    """
+    out: list[EdgePrimitive] = []
+    for node in sexpr.walk(tree):
+        layer = sexpr.find(node, "layer")
+        if layer is None or len(layer) < 2 or not isinstance(layer[1], Atom):
+            continue
+        if layer[1].text != "Edge.Cuts":
+            continue
+
+        kind = sexpr.head(node)
+        if kind == "gr_line":
+            start = _numbers(sexpr.find(node, "start"))
+            end = _numbers(sexpr.find(node, "end"))
+            if len(start) >= 2 and len(end) >= 2:
+                out.append(EdgePrimitive("segment", mm_to_nm(start[0]), mm_to_nm(start[1]),
+                                         mm_to_nm(end[0]), mm_to_nm(end[1])))
+        elif kind == "gr_arc":
+            start = _numbers(sexpr.find(node, "start"))
+            mid = _numbers(sexpr.find(node, "mid"))
+            end = _numbers(sexpr.find(node, "end"))
+            if len(start) >= 2 and len(mid) >= 2 and len(end) >= 2:
+                out.append(EdgePrimitive("arc", mm_to_nm(start[0]), mm_to_nm(start[1]),
+                                         mm_to_nm(end[0]), mm_to_nm(end[1]),
+                                         mm_to_nm(mid[0]), mm_to_nm(mid[1])))
+        elif kind == "gr_rect":
+            start = _numbers(sexpr.find(node, "start"))
+            end = _numbers(sexpr.find(node, "end"))
+            if len(start) >= 2 and len(end) >= 2:
+                x0, y0 = mm_to_nm(start[0]), mm_to_nm(start[1])
+                x1, y1 = mm_to_nm(end[0]), mm_to_nm(end[1])
+                corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                for i in range(4):
+                    ax, ay = corners[i]
+                    bx, by = corners[(i + 1) % 4]
+                    out.append(EdgePrimitive("segment", ax, ay, bx, by))
+        elif kind == "gr_circle":
+            centre = _numbers(sexpr.find(node, "center"))
+            rim = _numbers(sexpr.find(node, "end"))
+            if len(centre) >= 2 and len(rim) >= 2:
+                cx, cy = mm_to_nm(centre[0]), mm_to_nm(centre[1])
+                radius = int(math.dist((cx, cy), (mm_to_nm(rim[0]), mm_to_nm(rim[1]))))
+                # Two semicircles: a full circle has no distinct start and end.
+                out.append(EdgePrimitive("arc", cx - radius, cy, cx + radius, cy,
+                                         cx, cy - radius))
+                out.append(EdgePrimitive("arc", cx + radius, cy, cx - radius, cy,
+                                         cx, cy + radius))
+        elif kind == "gr_poly":
+            pts = sexpr.find(node, "pts")
+            if pts is None:
+                continue
+            points = []
+            for pt in sexpr.find_all(pts, "xy"):
+                vals = _numbers(pt)
+                if len(vals) >= 2:
+                    points.append((mm_to_nm(vals[0]), mm_to_nm(vals[1])))
+            for i in range(len(points)):
+                ax, ay = points[i]
+                bx, by = points[(i + 1) % len(points)]
+                out.append(EdgePrimitive("segment", ax, ay, bx, by))
+    return out
+
+
 def _outline_bbox(tree: Node) -> tuple[int, int, int, int]:
     xs: list[float] = []
     ys: list[float] = []
@@ -419,4 +506,5 @@ def load_problem(board_path: str | Path, project_path: str | Path | None = None)
         source_path=board_path,
         project_path=project_path,
         net_names=net_names,
+        edges=tuple(_edge_primitives(tree)),
     )

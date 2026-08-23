@@ -5,6 +5,12 @@ Strategies that cannot run in a given environment are still registered; they rai
 that quietly vanishes from the leaderboard is worse than one that is visibly absent.
 """
 
-from . import s0_random, s1_grid_astar, s2_freerouting, s3_kicad_pns  # noqa: F401
+from . import (  # noqa: F401
+    s0_random,
+    s1_grid_astar,
+    s2_freerouting,
+    s3_kicad_pns,
+    s4_pathfinder,
+)
 
-__all__ = ["s0_random", "s1_grid_astar", "s2_freerouting", "s3_kicad_pns"]
+__all__ = ["s0_random", "s1_grid_astar", "s2_freerouting", "s3_kicad_pns", "s4_pathfinder"]
