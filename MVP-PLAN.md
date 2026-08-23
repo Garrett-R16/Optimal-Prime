@@ -34,6 +34,25 @@ and that is fine.
 
 ---
 
+## Status
+
+| Phase | State | Evidence |
+|---|---|---|
+| **P0 — Oracle** | **complete** | All four exit criteria verified. `unconnected_items` *is* in the CLI JSON and `kicad_version` comes free, so the risk in section 7.2 did not materialise. |
+| **P1 — Floor, bar, machinery** | **complete except the bar** | E2 run: 15 boards x 20 seeds x 2 strategies, 588 cells, 0 crashes. See [`results/E2-findings.md`](results/E2-findings.md). S2 (Freerouting) remains unavailable -- `kicad-cli` has no Specctra export -- so the *bar* is still the published 0.80 rather than a number measured here. |
+| P2 onward | not started | |
+
+**Headline results.** S1 beats the S0 floor on 14/15 boards with a geometric-mean DRV ratio
+of 0.011, and routes within 39% of the Steiner lower bound against the floor's 867%.
+**E2: net ordering alone moves violation count by a median of 50% (up to 140%), while moving
+wirelength by 11.6%** -- the measured form of the section 0 claim that the combinatorial
+choice dominates the geometric one. Net order never flipped Clean Pass on any board, which is
+a negative result P2 should re-test with a better router.
+
+45 tests pass, including the Level 1 differential and Level 3 synthetic instances.
+
+---
+
 ## 1. Why this is the right cut
 
 Three reasons this particular slice is worth building first, rather than a smaller or larger one.

@@ -153,3 +153,36 @@ def test_baseline_is_reconstructed_from_the_manifest(small_entry):
     baseline = runner._baseline_from_manifest(small_entry)
     assert baseline.unconnected_count == small_entry["baseline"]["unconnected"]
     assert baseline.kicad_version == small_entry["baseline"]["kicad_version"]
+
+
+# --------------------------------------------------------------------------- grid sanity
+
+def test_grid_does_not_saturate_on_any_board(manifest):
+    """Regression: pad halos and keepouts once blocked 95% of the routing area.
+
+    A grid that is mostly blocked produces a router that silently returns nothing, which
+    looks like a bad algorithm rather than the geometry bug it is. Any board whose free
+    area collapses is a bug until proven otherwise.
+    """
+    from strategies.s1_grid_astar import BLOCKED, Grid
+
+    worst = []
+    for entry in manifest["boards"]:
+        problem = load_problem(ROOT / entry["path"], ROOT / entry["project"])
+        grid = Grid(problem)
+        total = grid.nx * grid.ny * grid.nl
+        blocked = sum(plane.count(BLOCKED) for plane in grid.cells)
+        worst.append((blocked / total, entry["name"]))
+
+    worst.sort(reverse=True)
+    fraction, name = worst[0]
+    assert fraction < 0.60, f"{name}: {fraction:.1%} of the grid is blocked"
+
+
+def test_keepouts_that_only_forbid_copper_pours_do_not_block_tracks(manifest):
+    """A copperpour-only keepout must not appear as a routing obstacle at all."""
+    for entry in manifest["boards"]:
+        problem = load_problem(ROOT / entry["path"], ROOT / entry["project"])
+        for obstacle in problem.obstacles:
+            assert obstacle.blocks_tracks or obstacle.blocks_vias, \
+                f"{entry['name']}: obstacle that forbids nothing was still recorded"
