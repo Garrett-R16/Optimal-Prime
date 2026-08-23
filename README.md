@@ -43,6 +43,27 @@ natively, and PCBWorld/PCBench supply hundreds of real open-source boards in nat
 and the first experiment to run is the one that could falsify the premise of this repository.
 See [`MVP-PLAN.md`](MVP-PLAN.md).
 
+## Running the arena
+
+```bash
+python scripts/fetch_boards.py --source kicad-demos   # build the benchmark set
+python -m pytest tests/ -q                            # 40+ tests, incl. the DRC oracle
+python -c "from arena.runner import run_matrix; run_matrix(['S0','S1'], None, list(range(1,21)), tag='e2')"
+python scripts/report.py --tag e2                     # leaderboard + E2
+```
+
+Requires KiCad 9 (for `kicad-cli`) and Python 3.11+. Set `OPTIMAL_PRIME_KICAD_CLI` if
+`kicad-cli` is not on `PATH`.
+
+| Path | What it is |
+|---|---|
+| `arena/` | The measurement harness. No routing logic lives here. |
+| `strategies/` | One file per strategy, all implementing the same one-method interface. |
+| `scripts/fetch_boards.py` | Board ingestion: filter, normalise, strip, baseline, hash. |
+| `scripts/report.py` | Regenerates the leaderboard from run records. It is a view, not a file. |
+| `boards/` | Fetched benchmark instances (gitignored except the manifest). |
+| `results/runs/` | One self-describing JSON per (strategy, board, seed). |
+
 ## Notes
 
 - `papers/` is ~318 MB of PDFs. If this repository is pushed anywhere, put that directory
