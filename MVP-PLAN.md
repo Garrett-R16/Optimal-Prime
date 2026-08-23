@@ -40,7 +40,8 @@ and that is fine.
 |---|---|---|
 | **P0 — Oracle** | **complete** | All four exit criteria verified. `unconnected_items` *is* in the CLI JSON and `kicad_version` comes free, so the risk in section 7.2 did not materialise. |
 | **P1 — Floor, bar, machinery** | **complete except the bar** | E2 run: 15 boards x 20 seeds x 2 strategies, 600 cells, 0 crashes. See [`results/E2-findings.md`](results/E2-findings.md). S2 (Freerouting) remains unavailable -- `kicad-cli` has no Specctra export -- so the *bar* is still the published 0.80 rather than a number measured here. |
-| P2 onward | not started | |
+| **P2 — A real router** | **complete except S5** | Level 0 (5 predicates, ~6,000 random cases vs brute force) and Level 1 (zero unsafe disagreements with KiCad) both pass. S4 PathFinder beats S1 8x on median DRV and clears S1's best-of-20. See [`results/P2-findings.md`](results/P2-findings.md). Does not scale past ~80 nets within a 420 s budget. |
+| P3 onward | not started | |
 
 **Headline results.** S1 beats the S0 floor on 14/15 boards with a geometric-mean DRV ratio
 of 0.011, and routes within 37% of the Steiner lower bound against the floor's 867%.
@@ -49,7 +50,18 @@ wirelength by 14.4%** -- the measured form of the section 0 claim that the combi
 choice dominates the geometric one. Net order never flipped Clean Pass on any board, which is
 a negative result P2 should re-test with a better router.
 
-45 tests pass, including the Level 1 differential and Level 3 synthetic instances.
+**P2 headline.** S4 median DRV 5 against S1's 40, routability 0.993 against 0.839, and 11/11
+boards beaten against the floor at a geometric-mean ratio of 0.002. Negotiation halves
+order-sensitivity -- mean absolute DRV spread across seeds falls from 30.0 to 13.3 -- which is
+precisely what E2 said a router had to attack.
+
+S4's first version *lost* to S1, hitting the tripwire this section sets. The harness was not at
+fault: the negotiated resource was the grid cell centre, so two nets in adjacent cells recorded
+zero contention while their copper sat at the clearance limit. Making the resource a track's
+clearance envelope turned an 8x loss into an 8x win with no other change.
+
+79 tests pass, including Level 0 predicates, the Level 1 differential against KiCad, and Level 3
+synthetic instances.
 
 ---
 

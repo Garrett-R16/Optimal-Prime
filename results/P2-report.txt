@@ -1,0 +1,50 @@
+211 run records, 211 ok, strategies ['S0', 'S1', 'S4']
+engine: {'9.0.7'}  |  score_ver: {1}
+
+=== LEADERBOARD ==========================================================================
+strategy    cells    ok      CP    rout  DRV med  WL ratio    vias     time
+S0             75    75   0.000   0.736    457.0      9.48     0.0    0.00s
+S1             75    75   0.133   0.839     40.0      1.39    19.0   30.76s
+S4             61    61   0.164   0.905      6.0      1.53    12.0  100.96s
+
+=== PER BOARD (median over seeds) ========================================================
+board                           nets |   S0 CP   S0 DRV     S0 WL |   S1 CP   S1 DRV     S1 WL |   S4 CP   S4 DRV     S4 WL
+StickHub                          45 |    0.00    757.0    6190.7 |    0.00    338.0     597.9 |    0.00    492.0    1078.6
+carte_test                        83 |    0.00    709.0   17040.5 |    0.00     76.0    2938.9 |    0.00    103.0    4681.9
+complex_hierarchy                 50 |    0.00    427.0   10043.5 |    0.00     25.0    1603.2 |    0.00      2.0    1611.6
+custom_pads_test                   3 |    0.00      7.0     291.3 |    0.00      8.0     142.5 |    0.00      2.0     149.4
+ecc83-pp                           9 |    0.00     83.0    1010.6 |    1.00      0.0     286.7 |    1.00      0.0     286.7
+ecc83-pp_v2                        9 |    0.00     76.0     889.9 |    0.00      4.0     307.0 |    0.00      5.0     346.8
+flat_hierarchy                    34 |    0.00    456.0   16397.9 |    0.00     24.0    2198.6 |    0.00      6.0    2228.7
+interf_u                         110 |    0.00    611.0   21633.2 |    0.00    186.0    3359.7 |    0.00     16.0     968.9
+kit-dev-coldfire-xilinx_5213     209 |    0.00   1444.0   66504.7 |    0.00    196.0    5962.4 |       -        -         -
+multichannel_mixer                79 |    0.00   1323.0   20968.3 |    0.00    128.0    2662.1 |    0.00     12.0    2855.6
+pic_programmer                    34 |    0.00    453.0   16677.2 |    0.00     26.0    2279.5 |    0.00      9.0    2443.1
+sonde xilinx                      26 |    0.00    341.0    4344.7 |    0.00     40.0     839.3 |    0.00      7.0     902.0
+test_pads_inside_pads              2 |    0.00     11.0     517.9 |    1.00      0.0      73.4 |    1.00      0.0      73.4
+tinytapeout-demo                 108 |    0.00   1856.0   97473.0 |    0.00    230.0    6140.1 |    0.00     71.0    2253.8
+video                            371 |    0.00   3522.0  333792.4 |    0.00    991.0   21009.0 |       -        -         -
+
+=== PAIRED vs S0 (the floor) =============================================================
+  S1 vs S0 on DRV: 14 better, 1 worse, 0 tied (14/15 boards); geometric mean DRV ratio 0.012
+  S4 vs S0 on DRV: 13 better, 0 worse, 0 tied (13/13 boards); geometric mean DRV ratio 0.003
+
+=== E2: NET-ORDER SENSITIVITY (S4) ==============================================
+board                        seeds  CP rate | DRV best  DRV med DRV worst  spread |   WL best  WL worst   WL %
+StickHub                         5     0.00 |      473    492.0       531  11.8% |    1044.4    1081.6   3.6%
+carte_test                       5     0.00 |       98    103.0       117  18.4% |    4582.9    4896.0   6.8%
+complex_hierarchy                5     0.00 |        2      2.0         6 200.0% |    1609.3    1649.2   2.5%
+custom_pads_test                 5     0.00 |        2      2.0         2   0.0% |     149.4     149.4   0.0%
+ecc83-pp                         5     1.00 |        0      0.0         0   0.0% |     286.7     292.0   1.9%
+ecc83-pp_v2                      5     0.00 |        5      5.0         5   0.0% |     346.1     346.8   0.2%
+flat_hierarchy                   5     0.00 |        3      6.0        14 183.3% |    2189.8    2250.0   2.7%
+interf_u                         3     0.00 |        8     16.0        16  50.0% |     897.5     998.7  11.3%
+multichannel_mixer               5     0.00 |       11     12.0        28 141.7% |    2837.3    3016.5   6.3%
+pic_programmer                   5     0.00 |        5      9.0        13  88.9% |    2373.5    2569.6   8.3%
+sonde xilinx                     5     0.00 |        2      7.0         9 100.0% |     863.0     912.0   5.7%
+test_pads_inside_pads            5     1.00 |        0      0.0         0   0.0% |      73.4      73.4   0.0%
+tinytapeout-demo                 3     0.00 |       32     71.0        73  57.7% |    1639.2    2582.1  57.5%
+
+  boards where net order alone decides Clean Pass: 0/13
+  median DRV spread across orders: 50.0% of the median
+  median wirelength spread:        3.6%

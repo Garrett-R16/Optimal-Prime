@@ -102,6 +102,14 @@ class CongestionGrid(Grid):
     def contested(self) -> list[Node]:
         return [node for node, holders in self.usage.items() if len(holders) > 1]
 
+    def contested_nets(self) -> set[int]:
+        """Which nets are actually involved in contention right now."""
+        guilty: set[int] = set()
+        for holders in self.usage.values():
+            if len(holders) > 1:
+                guilty.update(holders)
+        return guilty
+
     def node_cost(self, node: Node, net: int) -> float:
         return ((1.0 + self.history.get(node, 0.0))
                 * (1.0 + self.pres_factor * self.overuse(node, net)))
@@ -285,11 +293,18 @@ class PathFinder:
         routes: dict[int, list[list[Node]]] = {}
         history: list[dict] = []
 
+        # After the first pass, only nets involved in contention are ripped up. Rerouting
+        # every net every iteration costs O(iterations x nets x A*) and is what stalled this
+        # on boards above ~80 nets; a net sitting in uncontested space has nothing to
+        # renegotiate.
+        pending: set[int] | None = None
+
         for iteration in range(self.iterations):
             if budget.exhausted():
                 break
 
-            for net in nets:
+            wave = nets if pending is None else [n for n in nets if n.code in pending]
+            for net in wave:
                 for path in routes.pop(net.code, []):
                     grid.release(path, net.code)
 
@@ -313,10 +328,13 @@ class PathFinder:
 
             contested = grid.contested()
             history.append({"iteration": iteration, "contested": len(contested),
+                            "rerouted": len(wave),
                             "pres_factor": round(grid.pres_factor, 3)})
 
             if not contested:
                 break
+
+            pending = grid.contested_nets()
 
             grid.bump_history(contested, self.history_gain)
             grid.pres_factor *= self.pres_growth
