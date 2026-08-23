@@ -1,6 +1,6 @@
 # P1 results — the floor, and how much of routing is net ordering
 
-*Engine: KiCad 9.0.7. Score version 1. 15 boards, 20 seeds, 588 cells, 0 crashes.
+*Engine: KiCad 9.0.7. Score version 1. 15 boards, 20 seeds, 600 cells, 0 crashes.
 Regenerate with `python scripts/report.py --tag e2`; raw table in [`E2-report.txt`](E2-report.txt).*
 
 ---
@@ -9,13 +9,13 @@ Regenerate with `python scripts/report.py --tag e2`; raw table in [`E2-report.tx
 
 | | S0 (uniform-random geometry) | S1 (random order + grid A*) |
 |---|---|---|
-| Clean Pass | 0.003 | 0.140 |
-| median DRV | 456.5 | 37.5 |
-| median WL / Steiner bound | **9.67×** | **1.39×** |
-| median vias | 0 | 18 |
+| Clean Pass | 0.003 | 0.133 |
+| median DRV | 456.5 | 42.5 |
+| median WL / Steiner bound | **9.67×** | **1.37×** |
+| median vias | 0 | 19 |
 
 S1 beats the floor on **14 of 15 boards**, geometric-mean DRV ratio **0.011** — roughly
-ninety times fewer violations. It routes within **39% of the Steiner lower bound**, against
+ninety times fewer violations. It routes within **37% of the Steiner lower bound**, against
 the floor's 867% over.
 
 This is what the floor is for. On its own, "S1 achieves Clean Pass 0.14" is uninterpretable.
@@ -37,10 +37,10 @@ to ordering alone.
 | | median across boards | worst board |
 |---|---|---|
 | DRV spread (worst − best, as % of median) | **50.0%** | **140%** (`carte_test`, 30 → 126) |
-| wirelength spread | **11.6%** | 51.6% (`interf_u`) |
+| wirelength spread | **14.4%** | 51.6% (`interf_u`) |
 
 Reordering nets changes how many rules you break by a factor of two, and on the worst board
-by a factor of four. It changes how much copper you use by about a tenth.
+by a factor of four. It changes how much copper you use by about a seventh.
 
 **This is the empirical form of the SYNTHESIS §0.3 claim**, measured rather than argued: the
 combinatorial choice dominates, and the geometric one is a rounding error next to it. It also
@@ -57,7 +57,7 @@ quality level, boards are either trivially passable or hopeless, and ordering de
 
 Fixing the pad-halo and keepout bugs (commit `aeb7e04`) **raised** S1's violation count on
 several boards — `StickHub` 136 → 312, `interf_u` 89 → 180 — while raising routability from
-0.772 to 0.870.
+0.772 to 0.836.
 
 That is the expected direction, not a regression. Before the fix the grid was heavily
 over-blocked, so S1 simply refused to route large numbers of nets; unrouted nets generate no
@@ -102,6 +102,6 @@ nothing at all to routing 78 of 79 nets.
   Every comparison below is against the floor only.
 - **WL_ratio's denominator is `(√3/2)·MST`**, a bound on a bound: obstacle-oblivious and
   layer-oblivious. Consistent across strategies, which is all it needs to be, but its absolute
-  value should not be quoted as "39% above optimal".
+  value should not be quoted as "37% above optimal".
 - **`time_s` is not comparable across machines**, and is recorded rather than optimised.
-  S1 spent 5,810 s of routing across 286 cells.
+  S1 spent 12,424 s of routing across 300 cells.

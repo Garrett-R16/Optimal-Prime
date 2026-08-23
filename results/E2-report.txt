@@ -1,10 +1,10 @@
-588 run records, 588 ok, strategies ['S0', 'S1']
+600 run records, 600 ok, strategies ['S0', 'S1']
 engine: {'9.0.7'}  |  score_ver: {1}
 
 === LEADERBOARD ==========================================================================
 strategy    cells    ok      CP    rout  DRV med  WL ratio    vias     time
 S0            300   300   0.003   0.739    456.5      9.67     0.0    0.00s
-S1            288   288   0.139   0.870     38.0      1.39    18.0   20.17s
+S1            300   300   0.133   0.836     42.5      1.37    19.0   41.41s
 
 === PER BOARD (median over seeds) ========================================================
 board                           nets |   S0 CP   S0 DRV     S0 WL |   S1 CP   S1 DRV     S1 WL
@@ -22,7 +22,7 @@ pic_programmer                    34 |    0.00    453.0   15941.7 |    0.00     
 sonde xilinx                      26 |    0.00    341.0    4327.8 |    0.00     41.0     857.0
 test_pads_inside_pads              2 |    0.05     11.0     547.9 |    1.00      0.0      73.4
 tinytapeout-demo                 108 |    0.00   1848.5   97470.2 |    0.00    230.5    6088.3
-video                            371 |    0.00   3522.5  334548.1 |    0.00   1027.0   25056.3
+video                            371 |    0.00   3522.5  334548.1 |    0.00   1023.0   25246.9
 
 === PAIRED vs S0 (the floor) =============================================================
   S1 vs S0 on DRV: 14 better, 1 worse, 0 tied (14/15 boards); geometric mean DRV ratio 0.011
@@ -43,8 +43,8 @@ pic_programmer                  20     0.00 |       14     25.0        35  84.0%
 sonde xilinx                    20     0.00 |       20     41.0        72 126.8% |     762.3     925.0  21.3%
 test_pads_inside_pads           20     1.00 |        0      0.0         0   0.0% |      73.4      73.4   0.0%
 tinytapeout-demo                20     0.00 |      170    230.5       258  38.2% |    5482.2    6311.6  15.1%
-video                            8     0.00 |      994   1027.0      1063   6.7% |   24554.6   26005.3   5.9%
+video                           20     0.00 |      983   1023.0      1093  10.8% |   23645.6   27038.9  14.4%
 
   boards where net order alone decides Clean Pass: 0/15
   median DRV spread across orders: 50.0% of the median
-  median wirelength spread:        11.6%
+  median wirelength spread:        14.4%
