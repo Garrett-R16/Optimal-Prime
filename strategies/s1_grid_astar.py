@@ -44,6 +44,34 @@ _MOVES = (
 )
 
 
+def _point_in_polygon(px: float, py: float, polygon) -> bool:
+    """Ray-casting point-in-polygon."""
+    inside = False
+    count = len(polygon)
+    for i in range(count):
+        ax, ay = polygon[i]
+        bx, by = polygon[(i + 1) % count]
+        if (ay > py) != (by > py):
+            t = (py - ay) / (by - ay) if by != ay else 0.0
+            if px < ax + t * (bx - ax):
+                inside = not inside
+    return inside
+
+
+def _distance_to_boundary(px: float, py: float, polygon) -> float:
+    """Shortest distance from a point to the polygon's edges."""
+    best = math.inf
+    count = len(polygon)
+    for i in range(count):
+        ax, ay = polygon[i]
+        bx, by = polygon[(i + 1) % count]
+        dx, dy = bx - ax, by - ay
+        span = dx * dx + dy * dy
+        t = 0.0 if span == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / span))
+        best = min(best, math.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+    return best
+
+
 class Grid:
     """Uniform occupancy grid over the board, one plane per copper layer.
 
@@ -121,22 +149,87 @@ class Grid:
     def _block_obstacles(self, problem: Problem) -> None:
         halo = self.clearance_nm + self.track_nm // 2
         for obstacle in problem.obstacles:
+            if not obstacle.blocks_tracks:
+                continue
             for index, layer in enumerate(self.layers):
                 if obstacle.layers and not any(
                         pattern in (layer, "*.Cu") for pattern in obstacle.layers):
                     continue
-                self._stamp(index, obstacle.x, obstacle.y,
-                            obstacle.radius_nm + halo, BLOCKED, contest=False)
+                if obstacle.polygon:
+                    self._stamp_polygon(index, obstacle.polygon, halo)
+                else:
+                    self._stamp(index, obstacle.x, obstacle.y,
+                                obstacle.radius_nm + halo, BLOCKED, contest=False)
+
+    def _stamp_polygon(self, plane: int, polygon: tuple[tuple[int, int], ...],
+                       halo_nm: int) -> None:
+        """Block every cell inside a polygon, or within ``halo_nm`` of its boundary."""
+        cells = self.cells[plane]
+        xs = [px for px, _ in polygon]
+        ys = [py for _, py in polygon]
+        ix0, iy0 = self.to_cell(min(xs) - halo_nm, min(ys) - halo_nm)
+        ix1, iy1 = self.to_cell(max(xs) + halo_nm, max(ys) + halo_nm)
+
+        for iy in range(max(0, iy0), min(self.ny, iy1 + 1)):
+            row = iy * self.nx
+            for ix in range(max(0, ix0), min(self.nx, ix1 + 1)):
+                px, py = self.to_nm(ix, iy)
+                if _point_in_polygon(px, py, polygon) or                         _distance_to_boundary(px, py, polygon) <= halo_nm:
+                    cells[row + ix] = BLOCKED
+
+    def _stamp_pad(self, plane: int, pad: Pad, halo_nm: int, value: int) -> None:
+        """Claim the pad's own footprint inflated by ``halo_nm``, as a rotated rectangle.
+
+        Using the pad's *enclosing circle* here instead is catastrophic on boards with large
+        or elongated pads: the halo over-covers by up to sqrt(2), every overlap between two
+        nets' halos becomes a hard block, and the grid saturates. On multichannel_mixer that
+        blocked 95% of all cells and the router returned nothing at all.
+        """
+        cells = self.cells[plane]
+        hx = max(pad.size_x / 2, self.pitch / 2)
+        hy = max(pad.size_y / 2, self.pitch / 2)
+        if pad.shape == "circle":
+            hx = hy = max(hx, hy)
+
+        reach = math.hypot(hx, hy) + halo_nm
+        radius_cells = int(reach // self.pitch) + 1
+        ix0, iy0 = self.to_cell(pad.x, pad.y)
+        angle = math.radians(pad.angle)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+
+        for dy in range(-radius_cells, radius_cells + 1):
+            iy = iy0 + dy
+            if not 0 <= iy < self.ny:
+                continue
+            row = iy * self.nx
+            for dx in range(-radius_cells, radius_cells + 1):
+                ix = ix0 + dx
+                if not 0 <= ix < self.nx:
+                    continue
+                px, py = self.to_nm(ix, iy)
+                ox, oy = px - pad.x, py - pad.y
+                lx = ox * cos_a - oy * sin_a
+                ly = oy * cos_a + ox * sin_a
+                nearest_x = min(max(lx, -hx), hx)
+                nearest_y = min(max(ly, -hy), hy)
+                if math.hypot(lx - nearest_x, ly - nearest_y) > halo_nm:
+                    continue
+                index = row + ix
+                current = cells[index]
+                if current == BLOCKED:
+                    continue
+                if current == FREE or current == value:
+                    cells[index] = value
+                else:
+                    cells[index] = BLOCKED
 
     def _claim_pads(self, problem: Problem) -> None:
         """Claim pad footprints and their clearance halos, and record which pad owns which cell."""
         halo = self.clearance_nm + self.track_nm // 2
 
         for pad in problem.pads:
-            extent = max(pad.radius_nm, self.pitch // 2)
             for plane in self.planes_for(pad):
-                self._stamp(plane, pad.x, pad.y, extent + halo,
-                            pad.net if pad.net else BLOCKED, contest=True)
+                self._stamp_pad(plane, pad, halo, pad.net if pad.net else BLOCKED)
 
         # A pad's own cell is always reachable by its own net, even if the halo pass
         # contested it -- otherwise dense placements become trivially unroutable.

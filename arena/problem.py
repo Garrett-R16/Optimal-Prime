@@ -109,13 +109,22 @@ class Net:
 
 @dataclass(frozen=True, slots=True)
 class Obstacle:
-    """Anything copper must avoid that is not a pad: keepouts, holes, locked copper."""
+    """Anything copper must avoid that is not a pad: keepouts, holes, locked copper.
+
+    A hole is a disc (``polygon`` is empty). A keepout is a polygon -- approximating one by
+    its bounding circle is catastrophic for the long thin keepouts real boards use: on
+    multichannel_mixer four slot keepouts became four 53.7 mm discs on a 110 mm board and
+    blocked 95% of the routing area.
+    """
 
     kind: str
     x: int
     y: int
     radius_nm: int
     layers: tuple[str, ...]
+    polygon: tuple[tuple[int, int], ...] = ()
+    blocks_tracks: bool = True
+    blocks_vias: bool = True
 
 
 @dataclass
@@ -280,26 +289,41 @@ def _obstacles(tree: Node) -> list[Obstacle]:
         keepout = sexpr.find(zone, "keepout")
         if keepout is None:
             continue
+
+        # A keepout says which *kinds* of thing are forbidden. One that only excludes copper
+        # pours must not block tracks, or whole boards become unroutable for no reason.
+        def forbids(what: str) -> bool:
+            rule = sexpr.find(keepout, what)
+            return rule is not None and len(rule) > 1 and rule[1].text == "not_allowed"
+
+        blocks_tracks = forbids("tracks")
+        blocks_vias = forbids("vias")
+        if not (blocks_tracks or blocks_vias):
+            continue
+
         poly = sexpr.find(zone, "polygon")
         pts = sexpr.find(poly, "pts") if poly is not None else None
         if pts is None:
             continue
-        xs, ys = [], []
+        points: list[tuple[int, int]] = []
         for pt in sexpr.find_all(pts, "xy"):
             vals = _numbers(pt)
             if len(vals) >= 2:
-                xs.append(vals[0])
-                ys.append(vals[1])
-        if not xs:
+                points.append((mm_to_nm(vals[0]), mm_to_nm(vals[1])))
+        if len(points) < 3:
             continue
-        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-        radius = max(max(xs) - min(xs), max(ys) - min(ys)) / 2
+
+        xs = [px for px, _ in points]
+        ys = [py for _, py in points]
         out.append(Obstacle(
             kind="keepout",
-            x=mm_to_nm(cx),
-            y=mm_to_nm(cy),
-            radius_nm=mm_to_nm(radius),
+            x=(min(xs) + max(xs)) // 2,
+            y=(min(ys) + max(ys)) // 2,
+            radius_nm=max(max(xs) - min(xs), max(ys) - min(ys)) // 2,
             layers=_layer_names(sexpr.find(zone, "layers")) or ("*.Cu",),
+            polygon=tuple(points),
+            blocks_tracks=blocks_tracks,
+            blocks_vias=blocks_vias,
         ))
     return out
 

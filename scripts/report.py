@@ -24,8 +24,17 @@ def load_runs(tag: str) -> list[dict]:
     directory = ROOT / "results" / "runs" / tag
     if not directory.exists():
         raise SystemExit(f"no runs at {directory}")
-    return [json.loads(p.read_text(encoding="utf-8"))
-            for p in sorted(directory.rglob("seed*.json"))]
+    # Match only run records: a sweep in progress also leaves transient seedNNNN.drc.json
+    # files beside them, and globbing "seed*.json" swallows those too.
+    records = [p for p in sorted(directory.rglob("seed*.json"))
+               if not p.name.endswith(".drc.json")]
+    out = []
+    for path in records:
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue  # a cell still being written by a concurrent sweep
+    return out
 
 
 def _ok(runs: list[dict]) -> list[dict]:
