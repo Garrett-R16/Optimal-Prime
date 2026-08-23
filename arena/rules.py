@@ -70,6 +70,8 @@ CANONICAL_SEVERITIES: dict[str, str] = {
     "through_hole_pad_without_hole": "error",
     # --- board integrity: not ours, but a board failing these is unusable --------------
     "invalid_outline": "error",
+    # A zone assigned to no net is a board-authoring choice, not something routing causes.
+    "zone_has_empty_net": "ignore",
     # --- frozen out of MVP-01 scope ----------------------------------------------------
     "diff_pair_gap_out_of_range": "ignore",
     "diff_pair_uncoupled_length_too_long": "ignore",
@@ -98,6 +100,7 @@ CANONICAL_SEVERITIES: dict[str, str] = {
     "mirrored_text_on_front_layer": "ignore",
     "nonmirrored_text_on_back_layer": "ignore",
     "silk_edge_clearance": "ignore",
+    "text_on_edge_cuts": "ignore",
     "silk_over_copper": "ignore",
     "silk_overlap": "ignore",
     "text_height": "ignore",

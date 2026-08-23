@@ -3,7 +3,8 @@
 papers/**/*.pdf
 
 # Benchmark boards are fetched, not committed. See scripts/fetch_boards.py
-boards/
+boards/*
+!boards/manifest.json
 
 # Run artifacts. Result JSON under results/runs/ is committed selectively, not wholesale.
 results/runs/
