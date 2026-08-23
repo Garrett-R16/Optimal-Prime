@@ -13,6 +13,7 @@ record. See MVP-PLAN.md section 5.1.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -142,15 +143,37 @@ class DesignRules:
     min_via_annular_width_nm: int
     allow_blind_buried_vias: bool
     allow_microvias: bool
+    #: (glob pattern, netclass name), in KiCad's own precedence order.
+    patterns: tuple[tuple[str, str], ...] = field(default=())
     unclassified_severities: tuple[str, ...] = field(default=())
 
     @property
     def default(self) -> NetClass:
         return self.classes["Default"]
 
+    @property
+    def max_clearance_nm(self) -> int:
+        """Widest clearance any netclass demands -- what a uniform grid must be sized for."""
+        return max([c.clearance_nm for c in self.classes.values()] + [self.min_clearance_nm])
+
+    @property
+    def max_track_width_nm(self) -> int:
+        return max([c.track_width_nm for c in self.classes.values()]
+                   + [self.min_track_width_nm])
+
     def for_net(self, net_name: str) -> NetClass:
-        """The netclass governing ``net_name``, falling back to Default."""
-        return self.classes.get(self.net_to_class.get(net_name, "Default"), self.default)
+        """The netclass governing ``net_name``, falling back to Default.
+
+        Explicit assignments win over patterns; among patterns, the first match wins, which
+        is how KiCad resolves them.
+        """
+        assigned = self.net_to_class.get(net_name)
+        if assigned and assigned in self.classes:
+            return self.classes[assigned]
+        for pattern, cls_name in self.patterns:
+            if fnmatch.fnmatchcase(net_name, pattern) and cls_name in self.classes:
+                return self.classes[cls_name]
+        return self.default
 
 
 def _nm(value: float | None, fallback_nm: int) -> int:
@@ -193,6 +216,15 @@ def load_design_rules(project_path: Path) -> DesignRules:
         elif isinstance(nets, str):
             net_to_class[cls_name] = nets
 
+    # KiCad 9 assigns netclasses by glob pattern; netclass_assignments is the older form and
+    # is usually absent. Missing this silently gives every net the Default rules, which shows
+    # up much later as clearance violations on exactly the nets that needed wider spacing.
+    patterns = tuple(
+        (str(entry.get("pattern", "")), str(entry.get("netclass", "Default")))
+        for entry in (net_settings.get("netclass_patterns") or [])
+        if entry.get("pattern")
+    )
+
     known = set(CANONICAL_SEVERITIES)
     unclassified = tuple(sorted(set(settings.get("rule_severities", {})) - known))
 
@@ -208,6 +240,7 @@ def load_design_rules(project_path: Path) -> DesignRules:
         min_via_annular_width_nm=_nm(raw_rules.get("min_via_annular_width"), 50_000),
         allow_blind_buried_vias=bool(raw_rules.get("allow_blind_buried_vias", False)),
         allow_microvias=bool(raw_rules.get("allow_microvias", False)),
+        patterns=patterns,
         unclassified_severities=unclassified,
     )
 

@@ -116,6 +116,30 @@ def normalise_project(source: Path, destination: Path) -> None:
     destination.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def strip_filled_zones(tree) -> int:
+    """Remove filled copper pours, keeping keepout zones.
+
+    A pour is not a fixed obstacle: KiCad recomputes its fill around whatever tracks exist,
+    carving clearance out of the copper. ``kicad-cli`` has no zone-fill command, so a pour
+    left in place keeps the fill computed for the *original* routing and every track we lay
+    reads as a clearance violation against copper that would not be there in reality.
+
+    Rather than score against a stale fill, the pour is removed and its net becomes something
+    the router has to reach with real copper. That makes the instance harder and well-posed
+    instead of easier and wrong. Restoring pours needs zone refill over the IPC API, which is
+    a P2+ concern; the count is recorded in the manifest so the change is never invisible.
+    """
+    keep, removed = [], 0
+    for child in tree:
+        if isinstance(child, list) and sexpr.head(child) == "zone":
+            if sexpr.find(child, "keepout") is None:
+                removed += 1
+                continue
+        keep.append(child)
+    tree[:] = keep
+    return removed
+
+
 def ingest(board_path: Path, out_dir: Path) -> dict | None:
     """Normalise, strip and baseline one board. Returns its manifest entry, or None."""
     try:
@@ -139,6 +163,7 @@ def ingest(board_path: Path, out_dir: Path) -> dict | None:
 
     bare_tree = sexpr.parse(sexpr.dumps(problem.tree))
     stripped = clear_routing(bare_tree)
+    pours = strip_filled_zones(bare_tree)
     board_out = target / f"{board_path.stem}.kicad_pcb"
     board_out.write_text(sexpr.dumps(bare_tree), encoding="utf-8", newline="\n")
 
@@ -161,6 +186,7 @@ def ingest(board_path: Path, out_dir: Path) -> dict | None:
         "nets": len(bare.routable_nets),
         "pads": len(bare.pads),
         "stripped_routing_items": stripped,
+        "stripped_filled_zones": pours,
         "baseline": {
             "kicad_version": baseline.kicad_version,
             "unconnected": baseline.unconnected_count,
