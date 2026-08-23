@@ -1,0 +1,21 @@
+# The paper corpus is ~318 MB of PDFs — too large for the repo. papers/INDEX.md IS tracked;
+# the PDFs are not. Move them behind Git LFS if they ever need to be shared.
+papers/**/*.pdf
+
+# Benchmark boards are fetched, not committed. See scripts/fetch_boards.py
+boards/
+
+# Run artifacts. Result JSON under results/runs/ is committed selectively, not wholesale.
+results/runs/
+
+# Scratch
+notes/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
