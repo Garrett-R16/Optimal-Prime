@@ -45,6 +45,11 @@ from .units import CLEARANCE_MARGIN, GUARDBAND_NM
 
 __all__ = ["plan_board"]
 
+#: A funnel path no longer than this multiple of its straight-line span is kept without
+#: consulting the exact solver. Above it, both are computed and the shorter wins -- the check
+#: is cheap next to a wasted millimetre of copper and the space it denies everything after it.
+_KEEP_WITHOUT_ASKING = 1.25
+
 
 # --------------------------------------------------------------------------- outline
 
@@ -403,28 +408,44 @@ def plan_board(board: Board, layers: list[str] | None = None,
 
         edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
         path = _as_path(link.elements) if link.elements else None
-        if (path is not None and not violated_obstacles(path, blockers)
-                and _clears_boundary(path, boundary, edge_gap)):
+        legal = (path is not None and not violated_obstacles(path, blockers)
+                 and _clears_boundary(path, boundary, edge_gap))
+
+        # Legal is not the same as good. The funnel can return a path that clears everything
+        # while wandering at nearly twice its own span, and keeping it because it is legal
+        # both wastes copper and takes space the connections after it need -- a *better*
+        # channel made the board worse that way, by producing a merely-adequate path where
+        # the previous one had been rejected outright. So a wandering path is measured
+        # against what the exact solver would do, and the shorter one wins.
+        if legal and path.length <= link.span * _KEEP_WITHOUT_ASKING:
             checked["funnelled"] += 1
             settled[link.layer].append((link.net.code, path, link.halo))
             continue
 
-        # The construction did not hold here. Fall back to the exact solver, which will
-        # choose its own class -- worse topology, but geometry that is certainly legal.
+        # Either the construction did not hold, or it held but wandered. Ask the exact
+        # solver, which chooses its own class -- worse topology, but geometry that is
+        # certainly legal and, when the funnel wandered, usually much shorter.
+        alternative = None
         try:
-            path = _solve_lazily(
+            alternative = _solve_lazily(
                 (float(link.pad_a.x), float(link.pad_a.y)),
                 (float(link.pad_b.x), float(link.pad_b.y)), blockers,
                 boundary=boundary, boundary_gap=edge_gap)
         except NoPathFound as exc:
-            link.elements = []
-            link.reason = f"funnel geometry rejected and no fallback path: {exc}"
-            checked["dropped"] += 1
+            if not legal:
+                link.elements = []
+                link.reason = f"funnel geometry rejected and no fallback path: {exc}"
+                checked["dropped"] += 1
+                continue
+
+        if legal and (alternative is None or path.length <= alternative.length):
+            checked["funnelled"] += 1
+            settled[link.layer].append((link.net.code, path, link.halo))
             continue
 
         checked["fell_back"] += 1
-        link.elements = list(path.elements)
-        settled[link.layer].append((link.net.code, path, link.halo))
+        link.elements = list(alternative.elements)
+        settled[link.layer].append((link.net.code, alternative, link.halo))
 
     for link in links:
         if not link.elements:

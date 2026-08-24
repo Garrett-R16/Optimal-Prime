@@ -5,11 +5,12 @@ picks a homotopy class -- which side of each pad to pass -- silently, as a side 
 two nets can pick incompatible ones without anything noticing. Here the class is the thing
 being chosen, explicitly, for every net at once, against a resource that can be counted.
 
-The resource is portal capacity (:mod:`taut.mesh`). Routes are found by A* over the triangle
-dual graph, and a portal wanted by more nets than fit gets progressively more expensive to
-use, so nets peel off to other doorways rather than piling up and being discovered in
-collision afterwards. That is PathFinder's negotiated congestion, applied where it belongs:
-to the topology, not to the geometry.
+The resource is portal capacity (:mod:`taut.mesh`). Routes are found by A* over the doorways
+themselves -- from one portal to the next, rather than from one triangle to the next, since a
+route is a chain of doorways and its length is theirs -- and a portal wanted by more nets than
+fit gets progressively more expensive to use, so nets peel off to other doorways rather than
+piling up and being discovered in collision afterwards. That is PathFinder's negotiated
+congestion, applied where it belongs: to the topology, not to the geometry.
 
 Two costs, as in the original formulation:
 
@@ -56,102 +57,82 @@ class TopoReport:
     converged: bool = False
 
 
-import os
-_MODE = os.environ.get("MODE", "mid")
-_PORTAL_PENALTY = float(os.environ.get("TP", 0.0))
-
-
 def _portal_midpoint(mesh: Mesh, key: tuple[int, int]) -> tuple[float, float]:
     a, b = mesh.points[key[0]], mesh.points[key[1]]
     return (float((a[0] + b[0]) / 2), float((a[1] + b[1]) / 2))
 
 
-def _closest_on(mesh, key, px, py):
-    a, b = mesh.points[key[0]], mesh.points[key[1]]
-    ax, ay = float(a[0]), float(a[1])
-    dx, dy = float(b[0]) - ax, float(b[1]) - ay
-    dd = dx * dx + dy * dy
-    if dd <= 0.0:
-        return ax, ay
-    t = ((px - ax) * dx + (py - ay) * dy) / dd
-    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
-    return ax + dx * t, ay + dy * t
-
-
-def _aim(mesh, key, px, py, gx, gy):
-    a, b = mesh.points[key[0]], mesh.points[key[1]]
-    ax, ay = float(a[0]), float(a[1])
-    dx, dy = float(b[0]) - ax, float(b[1]) - ay
-    lo, hi = 0.0, 1.0
-    for _ in range(28):
-        m1 = lo + (hi - lo) / 3.0
-        m2 = hi - (hi - lo) / 3.0
-        x1, y1 = ax + dx * m1, ay + dy * m1
-        x2, y2 = ax + dx * m2, ay + dy * m2
-        f1 = math.hypot(x1 - px, y1 - py) + math.hypot(x1 - gx, y1 - gy)
-        f2 = math.hypot(x2 - px, y2 - py) + math.hypot(x2 - gx, y2 - gy)
-        if f1 < f2:
-            hi = m2
-        else:
-            lo = m1
-    t = (lo + hi) / 2.0
-    return ax + dx * t, ay + dy * t
-
-
 def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
             start: tuple[float, float], goal: tuple[float, float],
             cost_of, node_limit: int = 400_000) -> tuple[list[int], list[tuple[int, int]]]:
+    """A* over doorways. Returns (triangle sequence, portal sequence).
+
+    A route is a chain of doorways, and what it costs once embedded is the length of that
+    chain -- not of the triangles that happen to lie between them. So a step is measured
+    from one portal midpoint to the next, and the search state is *(triangle, the portal it
+    was entered by)* rather than the triangle alone: where a route enters a triangle decides
+    how far it must travel to leave, and a triangle-only state cannot say that.
+
+    Charging centroid -> midpoint -> centroid instead, as this did, adds to every step a
+    detour no embedded track will make, and adds a different amount depending on where the
+    centroids happen to fall. Routes then follow the triangles whose centroids line up rather
+    than the channel that is actually shortest -- worst where triangles are long and thin,
+    which is exactly where the channels are.
+
+    A midpoint is a fixed property of a portal, so this remains an ordinary weighted graph
+    and A* over it remains exact. Anchoring the step somewhere path-dependent instead -- the
+    point on the doorway nearest where the route came from, or nearest the goal -- tracks the
+    taut length more closely, but makes an edge weight depend on the prefix that reached it,
+    and measured no better; nor did a flat charge per doorway crossed, which changed nothing
+    until it was large enough to buy detours. Neither is worth giving up exactness for.
+    """
     if start_tri < 0 or goal_tri < 0:
         return [], []
     if start_tri == goal_tri:
         return [start_tri], []
 
     gx, gy = goal
-    cache: dict[tuple[int, int], tuple[float, float]] = {}
+    midpoints: dict[tuple[int, int], tuple[float, float]] = {}
 
-    def anchor(key, px, py):
-        if _MODE == "mid":
-            point = cache.get(key)
-            if point is None:
-                point = cache[key] = _portal_midpoint(mesh, key)
-            return point
-        if _MODE == "near":
-            return _closest_on(mesh, key, px, py)
-        if _MODE == "goal":
-            point = cache.get(key)
-            if point is None:
-                point = cache[key] = _closest_on(mesh, key, gx, gy)
-            return point
-        return _aim(mesh, key, px, py, gx, gy)
+    def midpoint(key: tuple[int, int]) -> tuple[float, float]:
+        point = midpoints.get(key)
+        if point is None:
+            point = midpoints[key] = _portal_midpoint(mesh, key)
+        return point
 
-    def heuristic(px, py):
+    # Straight from the doorway to the goal. Whatever follows is a polyline through that
+    # midpoint, and congestion only ever multiplies a step upwards (``cost_of`` >= 1), so
+    # this never overestimates what is left: A* stays admissible, and in fact consistent.
+    def heuristic(px: float, py: float) -> float:
         return math.hypot(px - gx, py - gy)
 
-    heap = []
-    best: dict[tuple, float] = {}
-    came: dict[tuple, tuple | None] = {}
-    where: dict[tuple, tuple[float, float]] = {}
+    State = tuple[int, tuple[int, int]]
+    heap: list[tuple[float, float, State]] = []
+    best: dict[State, float] = {}
+    came: dict[State, State | None] = {}
 
-    sx, sy = start
+    def relax(cost: float, state: State, previous: State | None, portal: Portal,
+              px: float, py: float) -> None:
+        """Charge crossing into ``state``'s triangle, and queue it if that is an improvement."""
+        mx, my = midpoint(state[1])
+        step = math.hypot(mx - px, my - py) * cost_of(portal, net)
+        rest = heuristic(mx, my)
+        if state[0] == goal_tri:
+            # The last leg runs from the final doorway to the pad, so charge it here rather
+            # than letting the goal triangle be crossed for free.
+            step += rest
+            rest = 0.0
+        total = cost + step
+        if total < best.get(state, math.inf) - 1e-9:
+            best[state] = total
+            came[state] = previous
+            heapq.heappush(heap, (total + rest, total, state))
+
     for other, portal in mesh.adjacent(start_tri):
-        key = portal.key()
-        ax, ay = anchor(key, sx, sy)
-        step = math.hypot(ax - sx, ay - sy) + _PORTAL_PENALTY
-        cost = step * cost_of(portal, net)
-        rest = 0.0
-        if other == goal_tri:
-            cost += heuristic(ax, ay)
-        else:
-            rest = heuristic(ax, ay)
-        state = (other, key)
-        if cost < best.get(state, math.inf):
-            best[state] = cost
-            came[state] = None
-            where[state] = (ax, ay)
-            heapq.heappush(heap, (cost + rest, cost, state))
+        relax(0.0, (other, portal.key()), None, portal, start[0], start[1])
 
     expanded = 0
-    final = None
+    final: State | None = None
     while heap:
         _, cost, state = heapq.heappop(heap)
         if cost > best.get(state, math.inf):
@@ -163,31 +144,19 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
         expanded += 1
         if expanded > node_limit:
             return [], []
-        px, py = where[state]
+        px, py = midpoint(entry)
         for other, portal in mesh.adjacent(tri):
             key = portal.key()
             if key == entry:
                 continue
-            ax, ay = anchor(key, px, py)
-            step = math.hypot(ax - px, ay - py) + _PORTAL_PENALTY
-            nxt = cost + step * cost_of(portal, net)
-            rest = 0.0
-            if other == goal_tri:
-                nxt += heuristic(ax, ay)
-            else:
-                rest = heuristic(ax, ay)
-            successor = (other, key)
-            if nxt < best.get(successor, math.inf) - 1e-9:
-                best[successor] = nxt
-                came[successor] = state
-                where[successor] = (ax, ay)
-                heapq.heappush(heap, (nxt + rest, nxt, successor))
+            relax(cost, (other, key), state, portal, px, py)
 
     if final is None:
         return [], []
-    triangles = []
-    portals = []
-    cursor = final
+
+    triangles: list[int] = []
+    portals: list[tuple[int, int]] = []
+    cursor: State | None = final
     while cursor is not None:
         tri, key = cursor
         triangles.append(tri)
