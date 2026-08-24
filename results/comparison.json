@@ -9,18 +9,18 @@
       "connections": 20,
       "arcs": 12,
       "length_mm": 305.33,
-      "seconds": 2.5,
+      "seconds": 2.4,
       "drc": 0,
       "unconnected": 1
     },
-    "bundle": {
-      "routed": 19,
+    "relaxed": {
+      "routed": 20,
       "connections": 20,
-      "arcs": 12,
-      "length_mm": 305.34,
-      "seconds": 2.6,
+      "arcs": 14,
+      "length_mm": 292.85,
+      "seconds": 9.2,
       "drc": 0,
-      "unconnected": 1
+      "unconnected": 0
     }
   },
   {
@@ -34,16 +34,16 @@
       "connections": 20,
       "arcs": 5,
       "length_mm": 239.52,
-      "seconds": 0.9,
+      "seconds": 0.8,
       "drc": 0,
       "unconnected": 0
     },
-    "bundle": {
+    "relaxed": {
       "routed": 20,
       "connections": 20,
       "arcs": 5,
-      "length_mm": 239.53,
-      "seconds": 1.0,
+      "length_mm": 239.52,
+      "seconds": 16.1,
       "drc": 0,
       "unconnected": 0
     }
@@ -59,18 +59,18 @@
       "connections": 66,
       "arcs": 39,
       "length_mm": 690.3,
-      "seconds": 50.7,
+      "seconds": 56.9,
       "drc": 0,
       "unconnected": 3
     },
-    "bundle": {
-      "routed": 63,
+    "relaxed": {
+      "routed": 64,
       "connections": 66,
-      "arcs": 40,
-      "length_mm": 697.82,
-      "seconds": 63.1,
+      "arcs": 33,
+      "length_mm": 678.41,
+      "seconds": 334.7,
       "drc": 0,
-      "unconnected": 3
+      "unconnected": 2
     }
   }
 ]

@@ -101,6 +101,8 @@ def main() -> int:
     parser.add_argument("--order", default="longest-first",
                         choices=("longest-first", "shortest-first"))
     parser.add_argument("--tag", default=None, help="output name (defaults to board+layers)")
+    parser.add_argument("--relax-seconds", type=float, default=240.0,
+                        help="wall-clock budget for the joint relaxation")
     args = parser.parse_args()
 
     cli = find_cli()
@@ -117,7 +119,8 @@ def main() -> int:
     print(f"routing on {layers} ({args.order})")
 
     started = time.monotonic()
-    result = route_board(board, layers=layers, order=args.order)
+    result = route_board(board, layers=layers, order=args.order,
+                         relax_seconds=args.relax_seconds)
     elapsed = time.monotonic() - started
 
     out_board = work / f"{tag}.kicad_pcb"

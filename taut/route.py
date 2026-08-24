@@ -11,22 +11,18 @@ middle. The second arrives and finds the gap full. Re-routing the first puts it 
 where it was, because the taut path is deterministic; swapping their order only swaps who is
 stranded.
 
-So routing happens in two stages, which is the decomposition the whole project rests on:
+A board's copper is one arrangement, not a sequence of decisions. So every connection is
+first routed as if it were alone -- which gives it the shape it *wants* -- and the whole set
+is then relaxed together (:mod:`taut.relax`): all bands re-solved against the previous
+positions of all the others, all moved at once, with the clearance between them annealed from
+soft to solid so they can pass through each other while sorting out who goes which way.
 
-1. **Topology.** A first pass discovers which gap each connection wants. The gaps are then
-   counted (:mod:`taut.portals`) -- a gap of width ``D`` holds
-   ``floor((D - clearance) / (width + clearance))`` tracks -- and the nets contending for
-   each one are put in order across it and given slots.
-2. **Embedding.** Every connection is routed again against obstacles inflated by *its own
-   slot's* share of each gap, and **ignoring the other nets' copper entirely**. The first net
-   now hugs one wall, not because anything pushed it, but because the problem it was handed
-   already had the second net in it.
+Whatever is still overlapping once the clearance is fully hard is settled the old way, in
+order, against solid copper. That settling also chooses which layer each connection ends on,
+since picking a layer before the contention is known strands nets on a crowded one.
 
-Where the slot model does not hold -- an over-subscribed gap, or two paths that end up close
-anyway -- the affected connection falls back to being routed against the others as solid
-copper. That fallback is verified rather than assumed: every pair of finished paths is
-checked, and anything still too close is redone. The bundle is an optimisation; correctness
-never depends on it being right.
+Correctness never rests on the relaxation converging: the finished arrangement is checked on
+real geometry, and anything too close is routed again.
 """
 
 from __future__ import annotations
@@ -36,7 +32,7 @@ from dataclasses import dataclass, field
 
 from .board import Board, Net, Pad
 from .obstacles import Obstacle, arc_obstacle, pad_obstacle, track_obstacle
-from .portals import assign_slots, build_portals, crossings
+from .relax import relax
 from .tangent import (NoPathFound, PathArc, PathLine, TautPath, solve,
                       violated_obstacles)
 from .units import CLEARANCE_MARGIN, GUARDBAND_NM
@@ -286,22 +282,27 @@ class _Connection:
     layer: str | None = None
     path: TautPath | None = None
     bundled: bool = False
+    #: Set before relaxation; relax() reads these rather than reaching into the board.
+    net_code: int = 0
+    halo: float = 0.0
+    layer_options: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- the router
 
 def route_board(board: Board, layers: list[str] | None = None,
                 order: str = "longest-first", bundle: bool = True,
-                bundle_passes: int = 2, verbose: bool = False) -> RouteResult:
+                relax_steps: int = 5, relax_seconds: float = 240.0,
+                verbose: bool = False) -> RouteResult:
     """Route every net on ``board`` with taut strings.
 
     ``layers`` restricts which copper layers may be used; a connection is placed on whichever
     permitted layer yields the shortest taut path. It never inserts a via, so a connection
     between surface pads on opposite faces has no solution here.
 
-    ``bundle`` enables the two-stage scheme in the module docstring. Setting it False routes
-    each net against the finished copper of the ones before it, which is what this did
-    originally and is kept so the two can be compared.
+    ``bundle`` enables the joint relaxation described above. Setting it False settles the
+    connections one at a time against solid copper, which is what this did originally and is
+    kept so the two can be compared.
     """
     usable = tuple(layers) if layers else board.copper_layers
     unknown = [layer for layer in usable if layer not in board.copper_layers]
@@ -386,15 +387,42 @@ def route_board(board: Board, layers: list[str] | None = None,
 
     desired_length = sum(c.path.length for c in connections if c.path is not None)
 
-    # ---- stage 2: seat everyone, then route again ------------------------------------
-    stats = {"portals": 0, "shared": 0, "oversubscribed": 0, "reseated": 0,
-             "fallbacks": 0, "passes": 0, "dropped": 0}
+    # ---- stage 2: relax the whole set together ---------------------------------------
+    stats = {"relax_steps": 0, "relax_moved": 0, "relax_stuck": 0,
+             "relax_converged": False, "fallbacks": 0, "dropped": 0,
+             "length_by_step": [], "overlaps_by_step": []}
 
     if bundle:
-        for _ in range(bundle_passes):
-            stats["passes"] += 1
-            if not _bundle_pass(connections, usable, statics, attempt, stats, verbose):
-                break
+        movable = [c for c in connections if c.path is not None]
+        for conn in movable:
+            conn.net_code = conn.net.code
+            conn.halo = conn.clearance + conn.width + GUARDBAND_NM
+            conn.layer_options = tuple(
+                layer for layer in usable
+                if conn.pad_a.on_layer(layer) and conn.pad_b.on_layer(layer))
+
+        def solve_one(conn, layer, blockers):
+            statics_here = [o for o in statics(layer, conn.clearance, conn.half)
+                            if o.net != conn.net.code]
+            return attempt(conn, layer, statics_here + blockers)
+
+        # Relaxation is the expensive part and it improves monotonically, so it is given a
+        # wall-clock budget rather than a fixed amount of work. Running out means fewer
+        # annealing steps, not a worse-than-sequential answer: the settling pass afterwards
+        # makes whatever it produced legal.
+        import time as _time
+        deadline = _time.monotonic() + relax_seconds
+        report = relax(movable, solve_one, _path_obstacles, steps=relax_steps,
+                       verbose=verbose, budget=lambda: _time.monotonic() > deadline)
+        stats.update({
+            "relax_steps": report.steps,
+            "relax_moved": report.moved,
+            "relax_stuck": report.stuck,
+            "relax_converged": report.converged,
+            "length_by_step": report.length_by_step,
+            "overlaps_by_step": report.overlaps_by_step,
+        })
+
     _repair_overlaps(connections, usable, statics, attempt, stats, verbose)
 
     sequential_length = desired_length
@@ -421,64 +449,6 @@ def route_board(board: Board, layers: list[str] | None = None,
         **{f"bundle_{k}": v for k, v in stats.items()},
     })
     return result
-
-
-def _bundle_pass(connections, usable, statics, attempt, stats, verbose) -> bool:
-    """One topology-then-embedding round. Returns whether anything actually moved."""
-    moved = False
-
-    for layer in usable:
-        here = [c for c in connections if c.layer == layer and c.path is not None]
-        if len(here) < 2:
-            continue
-
-        clearance = min(c.clearance for c in here)
-        width = max(c.width for c in here)
-        half = max(c.half for c in here)
-
-        portals = build_portals(statics(layer, clearance, half), clearance, width,
-                                max_tracks=MAX_GAP_TRACKS)
-        stats["portals"] = max(stats["portals"], len(portals))
-        if not portals:
-            continue
-
-        found = {c.index: crossings(c.path, portals) for c in here}
-        plan = assign_slots(portals, found, clearance, width)
-        stats["shared"] = max(stats["shared"], plan.shared)
-        stats["oversubscribed"] = max(stats["oversubscribed"], len(plan.oversubscribed))
-        if not plan.extra:
-            continue
-
-        for conn in here:
-            base = statics(layer, conn.clearance, conn.half)
-            adjusted: list[Obstacle] = []
-            touched = False
-            for index, obstacle in enumerate(base):
-                if obstacle.net == conn.net.code:
-                    continue
-                extra = plan.inflation(conn.index, index)
-                if extra > 0.0:
-                    adjusted.append(Obstacle(vertices=obstacle.vertices,
-                                             r=obstacle.r + extra,
-                                             net=obstacle.net, label=obstacle.label))
-                    touched = True
-                else:
-                    adjusted.append(obstacle)
-            if not touched:
-                continue
-
-            try:
-                path = attempt(conn, layer, adjusted)
-            except NoPathFound:
-                continue          # keep the sequential answer; the repair pass covers it
-            conn.path = path
-            conn.bundled = True
-            moved = True
-            stats["reseated"] += 1
-            if verbose:
-                print(f"    reseated {conn.net.name} on {layer}")
-
-    return moved
 
 
 def _repair_overlaps(connections, usable, statics, attempt, stats, verbose) -> None:

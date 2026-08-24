@@ -16,23 +16,36 @@
     "connections": 20,
     "routed": 20,
     "failed": 0,
-    "tracks": 36,
+    "tracks": 34,
     "arcs": 5,
-    "length_mm": 239.53,
+    "length_mm": 239.52,
     "sequential_length_mm": 239.52,
-    "bundle_portals": 18,
-    "bundle_shared": 10,
-    "bundle_oversubscribed": 0,
-    "bundle_reseated": 12,
-    "bundle_fallbacks": 5,
-    "bundle_passes": 2,
-    "bundle_dropped": 0
+    "bundle_relax_steps": 5,
+    "bundle_relax_moved": 36,
+    "bundle_relax_stuck": 0,
+    "bundle_relax_converged": false,
+    "bundle_fallbacks": 4,
+    "bundle_dropped": 0,
+    "bundle_length_by_step": [
+      239.52,
+      239.52,
+      239.52,
+      239.52,
+      239.52
+    ],
+    "bundle_overlaps_by_step": [
+      7,
+      7,
+      7,
+      7,
+      7
+    ]
   },
   "drc_errors": 0,
   "drc_by_type": {},
   "unconnected": 0,
   "clean": true,
-  "seconds": 1.0,
+  "seconds": 13.8,
   "kicad": "9.0.7",
   "failures": []
 }

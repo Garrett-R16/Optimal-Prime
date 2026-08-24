@@ -103,7 +103,7 @@ def comparison_block() -> str:
     body = []
     for entry in rows:
         label = f"{entry['board']} [{'+'.join(entry['layers'])}]"
-        seq, bun = entry["sequential"], entry["bundle"]
+        seq, bun = entry["sequential"], entry["relaxed"]
         same = (seq["routed"] == bun["routed"] and seq["drc"] == bun["drc"])
         body.append(
             f"<tr><td rowspan='2' class='case'>{html.escape(label)}</td>"
@@ -111,16 +111,16 @@ def comparison_block() -> str:
             f"<td>{seq['routed']} / {seq['connections']}</td><td>{seq['arcs']}</td>"
             f"<td>{seq['length_mm']:.1f}</td><td>{seq['drc']}</td>"
             f"<td>{seq['unconnected']}</td><td>{seq['seconds']:.1f}</td></tr>"
-            f"<tr class='{'same' if same else 'diff'}'><td class='mode'>bundle</td>"
+            f"<tr class='{'same' if same else 'diff'}'><td class='mode'>relaxed</td>"
             f"<td>{bun['routed']} / {bun['connections']}</td><td>{bun['arcs']}</td>"
             f"<td>{bun['length_mm']:.1f}</td><td>{bun['drc']}</td>"
             f"<td>{bun['unconnected']}</td><td>{bun['seconds']:.1f}</td></tr>")
 
     return f"""
   <section>
-    <h2>Sequential versus bundle</h2>
+    <h2>One at a time, versus all together</h2>
     <p>Both schemes, same boards, same process &mdash; the only thing that differs is whether
-      nets are seated in their shared gaps before being routed.</p>
+      the bands are settled one after another or relaxed together.</p>
     <div class="tablewrap">
       <table class="compare">
         <thead><tr><th>board</th><th>scheme</th><th>connections</th><th>arcs</th>
@@ -128,11 +128,12 @@ def comparison_block() -> str:
         <tbody>{''.join(body)}</tbody>
       </table>
     </div>
-    <p class="note"><strong>The bundle changes nothing on these three boards.</strong> That is
-      the honest result, and it is worth stating plainly rather than burying. The mechanism is
-      correct &mdash; it is proven directly on the case it was built for, where a gap holds two
-      tracks, one net alone takes the middle of it, and the second cannot fit until both are
-      seated. None of these boards' remaining failures turn out to be that case.</p>
+    <p class="note">Where a board has any headroom at all, relaxing the bands together wins on
+      <em>both</em> counts &mdash; more connections finished <em>and</em> less copper. That is
+      the tell that it is doing the right thing: a band that had been taking the long way round
+      something now goes through instead, and the band it used to detour around gives up a
+      little of its own straightness to let it past. The two-layer case is unchanged because
+      there was nothing to recover; it already finished every connection.</p>
   </section>
 """
 
