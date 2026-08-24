@@ -8,8 +8,16 @@ are in *topological* conflict, and no amount of sliding paths around resolves it
 has to go the other way, and nothing in a geometric solver can express that.
 
 So the free space is triangulated over the obstacle corners. A triangle is free if its
-interior is outside every obstacle *core*; clearance is not baked in here, because it belongs
-to the embedding. Two free triangles that share an edge are connected by a **portal**, and a
+interior is outside every obstacle's copper; the routing *clearance* is not baked in here,
+because that belongs to the embedding.
+
+A shape's copper is not always its vertices. A round pad is one vertex at its centre carrying
+a radius, and an oval is two -- so a mesh built from vertices alone models those pads as
+points, triangulates straight through their copper, and measures portal spans centre to
+centre. On a board where most pads are round, that is most of the mesh: 31 of 88 triangles
+"free" while containing solid copper, 74 of 120 portals with their span buried in a pad. Every
+vertex therefore carries the radius of the shape that owns it, and freeness, portal span and
+capacity are all measured from the copper boundary rather than from the vertex. Two free triangles that share an edge are connected by a **portal**, and a
 net's route becomes a sequence of portals -- which *is* its homotopy class, written down
 where a search can reason about it.
 
@@ -60,6 +68,7 @@ class Portal:
 class Mesh:
     points: np.ndarray                     # (N, 2) vertex coordinates
     owner: list[int]                       # obstacle index per vertex, -1 for the outline
+    radius: list[float]                    # copper radius of the shape owning each vertex
     triangles: np.ndarray                  # (M, 3) vertex indices
     free: np.ndarray                       # (M,) bool
     neighbours: np.ndarray                 # (M, 3) triangle indices, -1 for none
@@ -118,8 +127,9 @@ class Mesh:
                 yield int(other), portal
 
 
-def _capacity(length: float, clearance: float, width: float) -> int:
-    usable = length - 2.0 * clearance - width
+def _capacity(span: float, clearance: float, width: float) -> int:
+    """How many tracks fit across a doorway, given the *copper-to-copper* span."""
+    usable = span - 2.0 * clearance - width
     if usable < 0.0:
         return 0
     return int(usable // (width + clearance)) + 1
@@ -130,14 +140,17 @@ def build_mesh(obstacles: list[Obstacle], outline: list[tuple[float, float]],
     """Triangulate the free space between ``obstacles``, inside ``outline``."""
     points: list[tuple[float, float]] = []
     owner: list[int] = []
+    radius: list[float] = []
 
     for index, obstacle in enumerate(obstacles):
         for vx, vy in obstacle.vertices:
             points.append((float(vx), float(vy)))
             owner.append(index)
+            radius.append(float(obstacle.r))
     for vx, vy in outline:
         points.append((float(vx), float(vy)))
         owner.append(-1)
+        radius.append(0.0)
 
     if len(points) < 3:
         raise ValueError("need at least three points to triangulate")
@@ -149,14 +162,15 @@ def build_mesh(obstacles: list[Obstacle], outline: list[tuple[float, float]],
     for index, simplex in enumerate(tri.simplices):
         cx, cy = array[simplex][:, 0].mean(), array[simplex][:, 1].mean()
         for obstacle in obstacles:
-            # The *core*, not the inflated shape: clearance is the embedding's job, and
-            # inflating here would delete every triangle that touches a pad.
-            if obstacle.distance_to_point(cx, cy) <= 0.0:
+            # Against the copper, which for a disc or capsule extends `r` beyond the vertices
+            # the triangulation was built from. Testing the bare vertices instead calls a
+            # triangle sitting squarely inside a round pad free.
+            if obstacle.distance_to_point(cx, cy) <= obstacle.r:
                 free[index] = False
                 break
 
-    mesh = Mesh(points=array, owner=owner, triangles=tri.simplices, free=free,
-                neighbours=tri.neighbors, obstacles=list(obstacles))
+    mesh = Mesh(points=array, owner=owner, radius=radius, triangles=tri.simplices,
+                free=free, neighbours=tri.neighbors, obstacles=list(obstacles))
 
     for index, simplex in enumerate(tri.simplices):
         if not free[index]:
@@ -172,16 +186,22 @@ def build_mesh(obstacles: list[Obstacle], outline: list[tuple[float, float]],
                 continue
             pa, pb = array[shared[0]], array[shared[1]]
             length = float(math.hypot(pb[0] - pa[0], pb[1] - pa[1]))
-            capacity = _capacity(length, clearance, width)
+
+            # The usable doorway runs from copper to copper, not vertex to vertex. For two
+            # round pads facing each other, the vertex span is centre to centre and counts
+            # both radii of solid copper as though a track could use them.
+            span = length - radius[shared[0]] - radius[shared[1]]
+            capacity = _capacity(span, clearance, width) if span > 0.0 else 0
 
             # A span that cuts through an obstacle is not a doorway. The obstacles owning the
-            # two endpoints are excluded, since the span naturally touches those.
+            # two endpoints are exempt only for their own copper, which the span subtraction
+            # above has already accounted for.
             owners = {owner[shared[0]], owner[shared[1]]}
             for oi, obstacle in enumerate(obstacles):
                 if oi in owners:
                     continue
                 if segment_to_obstacle(obstacle, float(pa[0]), float(pa[1]),
-                                       float(pb[0]), float(pb[1])) <= 0.0:
+                                       float(pb[0]), float(pb[1])) <= obstacle.r:
                     capacity = 0
                     break
 

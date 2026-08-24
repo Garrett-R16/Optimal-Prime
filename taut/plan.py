@@ -12,6 +12,14 @@ came before.
 4. **Embed**, with the class fixed: funnel through the narrowed gates, then tangent lines and
    arcs around the corners it wraps (:mod:`taut.funnel`).
 
+5. **Check it, and repair what does not hold.** The embedding is a construction, not a
+   proof: a doorway may be oriented from an approximate direction, or an arc may round a
+   corner further than that corner's own normal cone allows. So every finished path is
+   measured against the real obstacles, and anything too close is re-solved by the exact
+   tangent solver against solid copper. That solver chooses its own homotopy class, which is
+   the thing this module exists to avoid -- but a connection that falls back is one connection
+   choosing badly, where an unchecked violation is a board that cannot be made.
+
 Earlier versions did (4) alone and hoped (2) would emerge from it. It does not: two nets that
 both want the same side of the same pad are in topological conflict, and sliding geometry
 around never resolves that. One of them has to go the other way, which is a decision only
@@ -27,8 +35,11 @@ from .board import Board, Net, Pad
 from .funnel import Curve, Gate, Line, funnel, orient, taut_through
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
-from .route import (ArcTrack, RouteResult, Track, _convex_hull,
-                    _copper_shape_obstacles, MIN_PIECE_NM, MIN_SAGITTA_NM)
+from .route import (ArcTrack, RouteResult, Track, _board_boundary, _convex_hull,
+                    _copper_shape_obstacles, _path_obstacles, _solve_lazily,
+                    MIN_PIECE_NM, MIN_SAGITTA_NM)
+from .tangent import NoPathFound, PathArc, PathLine, TautPath
+from .tangent import violated_obstacles
 from .topo import Route, route_topology
 from .units import CLEARANCE_MARGIN, GUARDBAND_NM
 
@@ -132,56 +143,110 @@ def _cores(board: Board, layer: str) -> list[Obstacle]:
 
 def _gates_for(mesh: Mesh, route: Route, slot_of, clearance: float, width: float,
                halo: float) -> list[Gate] | None:
-    """Turn a portal sequence into the doorways this route may actually use."""
+    """Turn a portal sequence into the doorways this route may actually use.
+
+    Every offset is measured from the **copper**, not from the mesh vertex. A round pad is a
+    single vertex at its centre carrying a radius, so a gate placed ``halo`` from the vertex
+    sits inside the pad by exactly that radius -- which is what put two thirds of the gate
+    endpoints on this board in solid copper, and left every wrap arc short by the pad's own
+    radius.
+    """
     gates: list[Gate] = []
-    cursor = route.start
 
     for index, key in enumerate(route.portals):
         portal = mesh.portals[key]
         pa = (float(mesh.points[key[0]][0]), float(mesh.points[key[0]][1]))
         pb = (float(mesh.points[key[1]][0]), float(mesh.points[key[1]][1]))
+        ra = float(mesh.radius[key[0]])
+        rb = float(mesh.radius[key[1]])
 
         slot, total = slot_of(key, route)
         span = portal.length
-        usable = span - 2.0 * halo - (total - 1) * (width + clearance)
+        usable = span - ra - rb - 2.0 * halo - (total - 1) * (width + clearance)
         if usable < 0.0:
             return None
         share = usable / total
         stride = (width + clearance) + share
 
-        low = halo + slot * stride
-        high = low + share
-
-        ux, uy = (pb[0] - pa[0]) / span, (pb[1] - pa[1]) / span
-        end_a = (pa[0] + ux * low, pa[1] + uy * low)
-        end_b = (pa[0] + ux * (span - (halo + (total - 1 - slot) * stride)),
-                 pa[1] + uy * (span - (halo + (total - 1 - slot) * stride)))
-        if math.dist(end_a, end_b) < 0.0:
+        from_a = ra + halo + slot * stride
+        from_b = rb + halo + (total - 1 - slot) * stride
+        if from_a + from_b > span:
             return None
 
-        heading = route.start if index == 0 else cursor
-        ahead = route.goal if index == len(route.portals) - 1 else \
-            mesh.centroid(route.triangles[index + 1])
+        ux, uy = (pb[0] - pa[0]) / span, (pb[1] - pa[1]) / span
+        end_a = (pa[0] + ux * from_a, pa[1] + uy * from_a)
+        end_b = (pa[0] + ux * (span - from_b), pa[1] + uy * (span - from_b))
+
+        # Both ends of the crossing come from triangle centroids, including the first and the
+        # last. Substituting the pad centres there -- which sit inside their own pads -- put
+        # the direction far enough out to flip left for right on 4 of 87 gates.
+        heading = mesh.centroid(route.triangles[index])
+        ahead = mesh.centroid(route.triangles[index + 1])
         left, right = orient(heading, ahead, end_a, end_b)
 
-        left_vertex = pa if left is end_a else pb
-        right_vertex = pb if left is end_a else pa
-        left_radius = low if left is end_a else halo + (total - 1 - slot) * stride
-        right_radius = halo + (total - 1 - slot) * stride if left is end_a else low
-
-        gates.append(Gate(left=left, right=right,
-                          left_vertex=left_vertex, right_vertex=right_vertex,
-                          left_radius=max(left_radius, 1.0),
-                          right_radius=max(right_radius, 1.0)))
-        cursor = mesh.centroid(route.triangles[index + 1])
+        a_is_left = left is end_a
+        gates.append(Gate(
+            left=left, right=right,
+            left_vertex=pa if a_is_left else pb,
+            right_vertex=pb if a_is_left else pa,
+            left_radius=max(from_a if a_is_left else from_b, 1.0),
+            right_radius=max(from_b if a_is_left else from_a, 1.0),
+        ))
 
     return gates
+
+
+def _clears_boundary(path: TautPath, boundary, gap: float) -> bool:
+    """Whether a path keeps ``gap`` from every piece of the board outline.
+
+    ``violated_obstacles`` only knows about obstacles, and the outline is not one of them --
+    it is carried separately because it is exact geometry rather than an inflated shape. A
+    path checked without it can run off the edge of the board and be pronounced legal.
+    """
+    from .geometry import Arc as GeoArc
+    from . import geometry as geo
+
+    for element in path.elements:
+        if isinstance(element, PathLine):
+            for shape in boundary:
+                if isinstance(shape, GeoArc):
+                    if geo.segment_arc(element.x1, element.y1,
+                                       element.x2, element.y2, shape) < gap:
+                        return False
+                else:
+                    ax, ay, bx, by = shape
+                    if geo.segment_segment(element.x1, element.y1, element.x2, element.y2,
+                                           ax, ay, bx, by) < gap:
+                        return False
+        else:
+            own = element.as_geo()
+            for shape in boundary:
+                if isinstance(shape, GeoArc):
+                    if geo.arc_arc(own, shape) < gap:
+                        return False
+                else:
+                    ax, ay, bx, by = shape
+                    if geo.segment_arc(ax, ay, bx, by, own) < gap:
+                        return False
+    return True
+
+
+def _as_path(elements) -> TautPath:
+    """Funnel output in the form the geometric checker and emitter already understand."""
+    out = []
+    for element in elements:
+        if isinstance(element, Line):
+            out.append(PathLine(element.x1, element.y1, element.x2, element.y2))
+        else:
+            out.append(PathArc(element.cx, element.cy, element.r,
+                               element.start_angle, element.end_angle, element.ccw))
+    return TautPath(out)
 
 
 def _elements_to_tracks(elements, net: int, layer: str, width_nm: int) -> list:
     out = []
     for element in elements:
-        if isinstance(element, Line):
+        if isinstance(element, (Line, PathLine)):
             if element.length < MIN_PIECE_NM:
                 continue
             out.append(Track(net=net, layer=layer,
@@ -191,9 +256,10 @@ def _elements_to_tracks(elements, net: int, layer: str, width_nm: int) -> list:
         else:
             if element.length < MIN_PIECE_NM:
                 continue
-            sx, sy = element.at(0.0)
-            mx, my = element.at(0.5)
-            ex, ey = element.at(1.0)
+            at = element.at if hasattr(element, "at") else element.point_at
+            sx, sy = at(0.0)
+            mx, my = at(0.5)
+            ex, ey = at(1.0)
             sagitta = element.r * (1.0 - math.cos(abs(element.sweep) / 2.0))
             if sagitta < MIN_SAGITTA_NM:
                 if math.hypot(ex - sx, ey - sy) < MIN_PIECE_NM:
@@ -307,9 +373,63 @@ def plan_board(board: Board, layers: list[str] | None = None,
             wraps = funnel(route.start, route.goal, gates)
             link.elements = taut_through(route.start, route.goal, wraps)
 
+    # ---- check the geometry, and repair what does not hold --------------------------
+    checked = {"funnelled": 0, "fell_back": 0, "dropped": 0}
+    boundary = _board_boundary(board)
+
+    static_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
+
+    def statics(layer: str, clr: float, half: float) -> list[Obstacle]:
+        key = (layer, int(clr), int(half))
+        cached = static_cache.get(key)
+        if cached is None:
+            cached = [pad_obstacle(pad, clr, half) for pad in board.pads
+                      if pad.on_layer(layer)]
+            cached.extend(_copper_shape_obstacles(board, layer, clr + half))
+            static_cache[key] = cached
+        return cached
+
+    settled: dict[str, list[tuple[int, TautPath, float]]] = {layer: [] for layer in usable}
+
+    for link in sorted(links, key=lambda l: -l.span):
+        if link.layer is None:
+            continue
+        half = link.width / 2.0 + GUARDBAND_NM
+        blockers = [o for o in statics(link.layer, link.clearance, half)
+                    if o.net != link.net.code]
+        for net_code, path, halo in settled[link.layer]:
+            if net_code != link.net.code:
+                blockers.extend(_path_obstacles(path, link.halo, net_code))
+
+        edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
+        path = _as_path(link.elements) if link.elements else None
+        if (path is not None and not violated_obstacles(path, blockers)
+                and _clears_boundary(path, boundary, edge_gap)):
+            checked["funnelled"] += 1
+            settled[link.layer].append((link.net.code, path, link.halo))
+            continue
+
+        # The construction did not hold here. Fall back to the exact solver, which will
+        # choose its own class -- worse topology, but geometry that is certainly legal.
+        try:
+            path = _solve_lazily(
+                (float(link.pad_a.x), float(link.pad_a.y)),
+                (float(link.pad_b.x), float(link.pad_b.y)), blockers,
+                boundary=boundary, boundary_gap=edge_gap)
+        except NoPathFound as exc:
+            link.elements = []
+            link.reason = f"funnel geometry rejected and no fallback path: {exc}"
+            checked["dropped"] += 1
+            continue
+
+        checked["fell_back"] += 1
+        link.elements = list(path.elements)
+        settled[link.layer].append((link.net.code, path, link.halo))
+
     for link in links:
         if not link.elements:
-            if link.reason:
+            if link.reason and not any(f[0] == link.net.code and f[2] == link.reason
+                                       for f in result.failed):
                 result.failed.append((link.net.code, link.net.name, link.reason))
             continue
         result.tracks.extend(_elements_to_tracks(link.elements, link.net.code,
@@ -324,5 +444,6 @@ def plan_board(board: Board, layers: list[str] | None = None,
         "arcs": result.arc_count,
         "length_mm": round(result.total_length_nm / 1e6, 2),
         **{f"topo_{k}": v for k, v in topo_stats.items()},
+        **{f"embed_{k}": v for k, v in checked.items()},
     })
     return result
