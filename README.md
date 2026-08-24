@@ -16,6 +16,8 @@ lines tangent to them, joined by arcs riding on circles at their corners.
 The copper is then settled as one arrangement rather than a sequence of decisions. Every band
 is re-solved against the *previous* positions of all the others and all of them move at once,
 so two bands contending for the same space both give way instead of the first one keeping it.
+A connection that still cannot fit rips up whatever is blocking it and hands the displaced
+bands back to the queue, so nothing is dropped merely for arriving last.
 A `.kicad_pcb` holds exactly two kinds of copper, `segment` and `arc`, so the optimal geometry
 and the expressible geometry are the same set. Nothing is snapped, rounded, or flattened on
 the way out — the file holds the answer itself.
@@ -28,26 +30,25 @@ Two runs on the same KiCad demo board, judged entirely by KiCad's own DRC.
 |---|---|---|---|---|---|---|---|
 | `ecc83-pp` | F.Cu | **20 / 20** | 14 | 292.9 mm | **0** | **0** | 9 s |
 | `ecc83-pp` | F.Cu + B.Cu | **20 / 20** | 5 | 239.5 mm | **0** | **0** | 16 s |
-| `sonde xilinx` | F.Cu + B.Cu | 64 / 66 | 33 | 678.4 mm | **0** | 2 | 335 s |
+| `sonde xilinx` | F.Cu + B.Cu | **66 / 66** | 46 | 785.5 mm | **0** | **0** | 343 s |
 
-### One at a time, versus all together
+Every board fully routed, every board DRC-clean by KiCad's own check.
 
-Via `python scripts/compare.py`:
+### How it got there
 
-| board | scheme | connections | copper |
+Three schemes on the same boards, each one fixing what the last could not do:
+
+| board | one at a time | relaxed together | + rip-up |
 |---|---|---|---|
-| `ecc83-pp` F.Cu | one at a time | 19 / 20 | 305.3 mm |
-| | **all together** | **20 / 20** | **292.9 mm** |
-| `ecc83-pp` F.Cu+B.Cu | one at a time | 20 / 20 | 239.5 mm |
-| | all together | 20 / 20 | 239.5 mm |
-| `sonde xilinx` | one at a time | 63 / 66 | 690.3 mm |
-| | **all together** | **64 / 66** | **678.4 mm** |
+| `ecc83-pp` F.Cu | 19 / 20 | 20 / 20 | 20 / 20 |
+| `ecc83-pp` F.Cu+B.Cu | 20 / 20 | 20 / 20 | 20 / 20 |
+| `sonde xilinx` | 63 / 66 | 64 / 66 | **66 / 66** |
 
-Where a board has any headroom, relaxing the bands together wins on *both* counts — more
-connections finished **and** less copper. That is the tell that it is doing the right thing: a
-band that had been taking the long way round something now goes through instead, and the band
-it used to detour around gives up a little of its own straightness to let it past. The
-two-layer case is unchanged because there was nothing to recover.
+Relaxing the bands together recovers the detours one-at-a-time routing creates. Rip-up covers
+the last case: a connection that cannot fit takes the space from whatever is sitting on it and
+hands the displaced connections back to the queue. Without it, the last net placed gets
+whatever is left, and if that is nothing it is dropped — even when a path plainly exists and
+another net is merely sitting on it.
 
 Rendered results with the geometry visible: [`examples/results.html`](examples/results.html).
 
@@ -89,9 +90,11 @@ The whole route lands as a single undo step.
 - **Relaxation is slow.** Each step re-solves every contended band against every other, on
   every permitted layer. `sonde xilinx` takes about 5 minutes against 1 minute for settling
   one at a time, and it runs under a wall-clock budget rather than to convergence.
-- **It is not guaranteed to converge**, and does not always: 2 connections on `sonde xilinx`
-  are still unrouted. Whether a different global arrangement would fit them, or whether they
-  genuinely need a via, is not yet known.
+- **It is not guaranteed to converge.** It happens to finish every connection on all three
+  boards, but nothing about the method promises that, and there is no lower bound to say how
+  far the result sits from the best possible arrangement.
+- **Rip-up is budgeted, not principled.** Forty rip-ups per board stops two connections
+  trading the same space forever; it is not a convergence argument.
 
 None of these can produce an illegal board — they cost completed connections, never
 correctness. When no legal path exists the router says so instead of laying copper anyway.

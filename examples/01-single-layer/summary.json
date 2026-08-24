@@ -24,6 +24,7 @@
     "bundle_relax_converged": false,
     "bundle_fallbacks": 3,
     "bundle_dropped": 0,
+    "bundle_ripped": 0,
     "bundle_length_by_step": [
       370.36,
       271.76,
@@ -43,7 +44,7 @@
   "drc_by_type": {},
   "unconnected": 0,
   "clean": true,
-  "seconds": 9.8,
+  "seconds": 8.5,
   "kicad": "9.0.7",
   "failures": []
 }

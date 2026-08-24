@@ -14,18 +14,19 @@
     "order": "longest-first",
     "bundle": true,
     "connections": 66,
-    "routed": 64,
-    "failed": 2,
-    "tracks": 144,
-    "arcs": 33,
-    "length_mm": 678.41,
+    "routed": 66,
+    "failed": 0,
+    "tracks": 171,
+    "arcs": 46,
+    "length_mm": 785.47,
     "sequential_length_mm": 640.92,
     "bundle_relax_steps": 3,
     "bundle_relax_moved": 54,
     "bundle_relax_stuck": 7,
     "bundle_relax_converged": false,
-    "bundle_fallbacks": 15,
-    "bundle_dropped": 2,
+    "bundle_fallbacks": 16,
+    "bundle_dropped": 0,
+    "bundle_ripped": 3,
     "bundle_length_by_step": [
       690.32,
       660.89,
@@ -39,20 +40,9 @@
   },
   "drc_errors": 0,
   "drc_by_type": {},
-  "unconnected": 2,
-  "clean": false,
-  "seconds": 344.7,
+  "unconnected": 0,
+  "clean": true,
+  "seconds": 349.2,
   "kicad": "9.0.7",
-  "failures": [
-    {
-      "net": 13,
-      "name": "GND",
-      "reason": "no legal path once the bundle was seated"
-    },
-    {
-      "net": 7,
-      "name": "/TD0-PROG-D4",
-      "reason": "no legal path once the bundle was seated"
-    }
-  ]
+  "failures": []
 }
