@@ -11,29 +11,19 @@
     ],
     "order": "longest-first",
     "connections": 20,
-    "routed": 17,
-    "failed": 3,
+    "routed": 19,
+    "failed": 1,
     "tracks": 48,
-    "arcs": 21,
-    "length_mm": 289.14
+    "arcs": 12,
+    "length_mm": 305.33
   },
   "drc_errors": 0,
   "drc_by_type": {},
-  "unconnected": 3,
+  "unconnected": 1,
   "clean": false,
-  "seconds": 33.1,
+  "seconds": 2.5,
   "kicad": "9.0.7",
   "failures": [
-    {
-      "net": 13,
-      "name": "Net-(U1B-K)",
-      "reason": "F.Cu: no collision-free taut path between the endpoints"
-    },
-    {
-      "net": 4,
-      "name": "Net-(U1A-K)",
-      "reason": "F.Cu: no collision-free taut path between the endpoints"
-    },
     {
       "net": 1,
       "name": "GND",

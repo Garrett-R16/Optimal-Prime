@@ -15,15 +15,15 @@
     "connections": 20,
     "routed": 20,
     "failed": 0,
-    "tracks": 30,
+    "tracks": 34,
     "arcs": 5,
-    "length_mm": 240.23
+    "length_mm": 239.52
   },
   "drc_errors": 0,
   "drc_by_type": {},
   "unconnected": 0,
   "clean": true,
-  "seconds": 5.0,
+  "seconds": 1.0,
   "kicad": "9.0.7",
   "failures": []
 }

@@ -29,3 +29,14 @@ def mm_to_nm(value: float) -> int:
 def nm_to_mm(value: int) -> float:
     """Integer nanometres back to millimetres for emission."""
     return value / NM_PER_MM
+
+
+#: Fractional margin added on top of the design clearance.
+#:
+#: A taut path rides *exactly* on its keep-out boundary -- that is what taut means -- so
+#: without this the copper sits at precisely the clearance limit with nothing to spare for
+#: KiCad's own rounding, for solder-mask webbing between adjacent apertures, or for any small
+#: difference between our shape model and the engine's. Riding the limit is fragile rather
+#: than optimal; 8% of the clearance costs a few microns of routing room and removes a whole
+#: class of marginal violation.
+CLEARANCE_MARGIN = 0.08

@@ -1,0 +1,45 @@
+{
+  "board": "sonde xilinx",
+  "layers": [
+    "F.Cu",
+    "B.Cu"
+  ],
+  "order": "longest-first",
+  "stats": {
+    "board": "sonde xilinx",
+    "layers": [
+      "F.Cu",
+      "B.Cu"
+    ],
+    "order": "longest-first",
+    "connections": 66,
+    "routed": 63,
+    "failed": 3,
+    "tracks": 157,
+    "arcs": 38,
+    "length_mm": 690.3
+  },
+  "drc_errors": 0,
+  "drc_by_type": {},
+  "unconnected": 3,
+  "clean": false,
+  "seconds": 51.8,
+  "kicad": "9.0.7",
+  "failures": [
+    {
+      "net": 7,
+      "name": "/TD0-PROG-D4",
+      "reason": "F.Cu: no collision-free taut path between the endpoints"
+    },
+    {
+      "net": 1,
+      "name": "/CLK-D1",
+      "reason": "F.Cu: no collision-free taut path between the endpoints"
+    },
+    {
+      "net": 11,
+      "name": "/TMS-PROG-D2",
+      "reason": "F.Cu: no collision-free taut path between the endpoints"
+    }
+  ]
+}
