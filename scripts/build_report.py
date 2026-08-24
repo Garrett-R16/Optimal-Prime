@@ -94,7 +94,7 @@ def card(index: int, item: dict) -> str:
 
 
 def comparison_block() -> str:
-    """The sequential/bundle side-by-side, if it has been run."""
+    """How the three schemes compare, if the comparison has been run."""
     path = ROOT / "results" / "comparison.json"
     if not path.exists():
         return ""
@@ -103,24 +103,22 @@ def comparison_block() -> str:
     body = []
     for entry in rows:
         label = f"{entry['board']} [{'+'.join(entry['layers'])}]"
-        seq, bun = entry["sequential"], entry["relaxed"]
-        same = (seq["routed"] == bun["routed"] and seq["drc"] == bun["drc"])
-        body.append(
-            f"<tr><td rowspan='2' class='case'>{html.escape(label)}</td>"
-            f"<td class='mode'>sequential</td>"
-            f"<td>{seq['routed']} / {seq['connections']}</td><td>{seq['arcs']}</td>"
-            f"<td>{seq['length_mm']:.1f}</td><td>{seq['drc']}</td>"
-            f"<td>{seq['unconnected']}</td><td>{seq['seconds']:.1f}</td></tr>"
-            f"<tr class='{'same' if same else 'diff'}'><td class='mode'>relaxed</td>"
-            f"<td>{bun['routed']} / {bun['connections']}</td><td>{bun['arcs']}</td>"
-            f"<td>{bun['length_mm']:.1f}</td><td>{bun['drc']}</td>"
-            f"<td>{bun['unconnected']}</td><td>{bun['seconds']:.1f}</td></tr>")
+        modes = [(k, entry[k]) for k in ("sequential", "relaxed", "ripup") if k in entry]
+        for n, (mode, m) in enumerate(modes):
+            cell = (f"<td rowspan='{len(modes)}' class='case'>{html.escape(label)}</td>"
+                    if n == 0 else "")
+            done = m["routed"] == m["connections"] and m["drc"] == 0
+            body.append(
+                f"<tr class='{'same' if done else 'diff'}'>{cell}"
+                f"<td class='mode'>{html.escape(mode)}</td>"
+                f"<td>{m['routed']} / {m['connections']}</td><td>{m['arcs']}</td>"
+                f"<td>{m['length_mm']:.1f}</td><td>{m['drc']}</td>"
+                f"<td>{m['unconnected']}</td><td>{m['seconds']:.0f}</td></tr>")
 
     return f"""
   <section>
-    <h2>One at a time, versus all together</h2>
-    <p>Both schemes, same boards, same process &mdash; the only thing that differs is whether
-      the bands are settled one after another or relaxed together.</p>
+    <h2>How it got there</h2>
+    <p>Three schemes on the same boards, each one covering what the last could not.</p>
     <div class="tablewrap">
       <table class="compare">
         <thead><tr><th>board</th><th>scheme</th><th>connections</th><th>arcs</th>
@@ -128,12 +126,13 @@ def comparison_block() -> str:
         <tbody>{''.join(body)}</tbody>
       </table>
     </div>
-    <p class="note">Where a board has any headroom at all, relaxing the bands together wins on
-      <em>both</em> counts &mdash; more connections finished <em>and</em> less copper. That is
-      the tell that it is doing the right thing: a band that had been taking the long way round
-      something now goes through instead, and the band it used to detour around gives up a
-      little of its own straightness to let it past. The two-layer case is unchanged because
-      there was nothing to recover; it already finished every connection.</p>
+    <p class="note">Routing one band at a time strands whichever arrives last at a busy spot.
+      Relaxing them together recovers most of that &mdash; more connections finished
+      <em>and</em> less copper, which is the tell that it is doing the right thing. Rip-up
+      covers the rest: a connection that still cannot fit takes the space from whatever is
+      sitting on it, and the displaced bands go back in the queue to find somewhere else.
+      Without it the last band placed gets whatever is left, and if that is nothing it is
+      dropped &mdash; even where a path plainly exists and another net is merely on it.</p>
   </section>
 """
 

@@ -389,7 +389,7 @@ def route_board(board: Board, layers: list[str] | None = None,
 
     # ---- stage 2: relax the whole set together ---------------------------------------
     stats = {"relax_steps": 0, "relax_moved": 0, "relax_stuck": 0,
-             "relax_converged": False, "fallbacks": 0, "dropped": 0,
+             "relax_converged": False, "fallbacks": 0, "dropped": 0, "ripped": 0,
              "length_by_step": [], "overlaps_by_step": []}
 
     if bundle:
@@ -451,67 +451,107 @@ def route_board(board: Board, layers: list[str] | None = None,
     return result
 
 
-def _repair_overlaps(connections, usable, statics, attempt, stats, verbose) -> None:
+def _repair_overlaps(connections, usable, statics, attempt, stats, verbose,
+                     rip_budget: int = 40) -> None:
     """Settle the arrangement into something legal, and verify that it is.
 
-    Stage 1 routed every connection as though it were alone, so the paths may overlap and the
-    layer each one preferred was chosen without knowing about the others. Stage 2 seats them
-    in their shared gaps, which resolves the overlaps wherever the gap was wide enough.
+    Relaxation moves every band at once and gets the arrangement close. This finishes it:
+    connections are placed longest-first -- a long one has the least freedom -- and each is
+    checked against the copper already down.
 
-    This pass finishes the job. Connections are settled longest-first -- a long one has the
-    least freedom to route around others -- and each is checked against the copper already
-    settled. Anything still too close is routed again, **considering every layer it could go
-    on**, not just the one it picked in isolation. Deciding the layer before the contention
-    is known is what left a two-layer board using one layer and stranding a net on it.
+    The part that matters is what happens when one will not fit. Placing in order and never
+    revisiting means the last connection in gets whatever is left, and if that is nothing it
+    is simply dropped -- even though a path plainly exists and some other net is merely
+    sitting on it. So a connection that cannot be placed **rips up the copper that is blocking
+    it**, takes the space, and hands the displaced connections back to the queue to find
+    somewhere else. Rip-ups are budgeted, so a pair that would trade the same space forever
+    cannot.
 
-    The check is on the real geometry, not on the model that produced it, so the result is
-    legal even where the slot model did not hold.
+    The check is on real geometry, not on the model that produced it, so the result is legal
+    whatever the relaxation did or did not manage.
     """
     settled: dict[str, list[_Connection]] = {layer: [] for layer in usable}
+    ripped = 0
 
-    def blockers_on(layer: str, conn: _Connection) -> list[Obstacle]:
+    def blockers_on(layer: str, conn: _Connection, skip=()) -> list[Obstacle]:
         halo = conn.clearance + conn.width + GUARDBAND_NM
         out: list[Obstacle] = []
         for other in settled[layer]:
-            if other.net.code == conn.net.code or other.path is None:
+            if (other.net.code == conn.net.code or other.path is None
+                    or other in skip):
                 continue
             out.extend(_path_obstacles(other.path, halo, other.net.code))
         return out
 
-    ordered = sorted((c for c in connections if c.path is not None),
-                     key=lambda c: -c.span)
+    def options_for(conn: _Connection) -> list[str]:
+        return [layer for layer in usable
+                if conn.pad_a.on_layer(layer) and conn.pad_b.on_layer(layer)]
 
-    for conn in ordered:
-        options = [layer for layer in usable
-                   if conn.pad_a.on_layer(layer) and conn.pad_b.on_layer(layer)]
-
-        # If where it already sits is clear, leave it alone -- that is the bundle's answer.
-        if conn.layer in options and not violated_obstacles(conn.path,
-                                                            blockers_on(conn.layer, conn)):
-            settled[conn.layer].append(conn)
-            continue
-
-        stats["fallbacks"] += 1
+    def place(conn: _Connection, skip=()) -> tuple[float, str, TautPath] | None:
         best = None
-        for layer in options:
+        for layer in options_for(conn):
             blockers = [o for o in statics(layer, conn.clearance, conn.half)
                         if o.net != conn.net.code]
-            blockers.extend(blockers_on(layer, conn))
+            blockers.extend(blockers_on(layer, conn, skip))
             try:
                 path = attempt(conn, layer, blockers)
             except NoPathFound:
                 continue
             if best is None or path.length < best[0]:
                 best = (path.length, layer, path)
+        return best
 
-        if best is None:
-            conn.path = None
-            conn.layer = None
-            stats["dropped"] += 1
+    def culprits(conn: _Connection) -> list[_Connection]:
+        """Which settled connections are sitting where this one needs to be."""
+        guilty: list[_Connection] = []
+        for layer in options_for(conn):
+            for other in settled[layer]:
+                if other.net.code == conn.net.code or other.path is None:
+                    continue
+                halo = conn.clearance + conn.width + GUARDBAND_NM
+                obstacles = _path_obstacles(other.path, halo, other.net.code)
+                if conn.path is not None and violated_obstacles(conn.path, obstacles):
+                    guilty.append(other)
+        return guilty
+
+    queue = sorted((c for c in connections if c.path is not None), key=lambda c: -c.span)
+    index = 0
+    while index < len(queue):
+        conn = queue[index]
+        index += 1
+
+        # Already where it wants to be and clear of everything? Leave it.
+        if conn.layer in options_for(conn) and conn.path is not None \
+                and not violated_obstacles(conn.path, blockers_on(conn.layer, conn)):
+            settled[conn.layer].append(conn)
             continue
 
-        _length, conn.layer, conn.path = best
-        conn.bundled = False
-        settled[conn.layer].append(conn)
-        if verbose:
-            print(f"    settled {conn.net.name} on {conn.layer}")
+        stats["fallbacks"] += 1
+        found = place(conn)
+        if found is not None:
+            _length, conn.layer, conn.path = found
+            settled[conn.layer].append(conn)
+            continue
+
+        # Nothing fits. Take the space from whoever is on it, and let them look elsewhere.
+        blocking = culprits(conn)
+        if blocking and ripped < rip_budget:
+            retry = place(conn, skip=blocking)
+            if retry is not None:
+                for victim in blocking:
+                    for layer in usable:
+                        if victim in settled[layer]:
+                            settled[layer].remove(victim)
+                    queue.append(victim)
+                    ripped += 1
+                    stats["ripped"] += 1
+                _length, conn.layer, conn.path = retry
+                settled[conn.layer].append(conn)
+                if verbose:
+                    print(f"    {conn.net.name} took space from "
+                          f"{[v.net.name for v in blocking]}")
+                continue
+
+        conn.path = None
+        conn.layer = None
+        stats["dropped"] += 1
