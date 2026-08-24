@@ -19,10 +19,10 @@ import math
 from dataclasses import dataclass, field
 
 from .board import Board, Net, Pad
-from .obstacles import Disc, discs_along_arc, discs_along_segment, pad_disc
+from .obstacles import Obstacle, arc_obstacle, pad_obstacle, track_obstacle
 from .tangent import (NoPathFound, PathArc, PathLine, TautPath, solve,
-                      violated_discs)
-from .units import GUARDBAND_NM
+                      violated_obstacles)
+from .units import CLEARANCE_MARGIN, GUARDBAND_NM
 
 __all__ = ["Track", "ArcTrack", "RouteResult", "route_board"]
 
@@ -72,28 +72,56 @@ class RouteResult:
         return sum(1 for t in self.tracks if isinstance(t, ArcTrack))
 
 
-def _edge_discs(board: Board, radius: float) -> list[Disc]:
-    """The board outline, as a chain of keep-out discs.
+def _copper_shape_obstacles(board: Board, layer: str, halo: float) -> list[Obstacle]:
+    """Graphics drawn on a copper layer, as keep-outs.
 
-    Without this the router happily runs copper off the edge of the board -- four
-    copper_edge_clearance violations on the very first run.
+    They belong to no net, so nothing may share space with them. A stroked line or polygon
+    is inflated by half its stroke width on top of the clearance halo.
     """
-    from .geometry import Arc as GeoArc
-
-    out: list[Disc] = []
-    for edge in board.edges:
-        if edge.kind == "segment":
-            out.extend(discs_along_segment(edge.x1, edge.y1, edge.x2, edge.y2,
-                                           radius, net=0, label="board edge"))
+    out: list[Obstacle] = []
+    for shape in board.copper_shapes:
+        if shape.layer != layer:
+            continue
+        radius = halo + shape.width_nm / 2.0
+        vertices = tuple((float(x), float(y)) for x, y in shape.vertices)
+        if len(vertices) == 1:
+            out.append(Obstacle(vertices=vertices, r=radius, net=0, label=shape.label))
+        elif len(vertices) == 2:
+            out.append(track_obstacle(*vertices[0], *vertices[1], radius, 0, shape.label))
         else:
-            arc = GeoArc.from_three_points(edge.x1, edge.y1, edge.xm, edge.ym,
-                                           edge.x2, edge.y2)
-            if arc.degenerate:
-                out.extend(discs_along_segment(edge.x1, edge.y1, edge.x2, edge.y2,
-                                               radius, net=0, label="board edge"))
+            # A polyline that is not a closed convex outline is covered edge by edge, which
+            # is correct for any shape and does not assume convexity.
+            hull = _convex_hull(vertices)
+            if len(hull) >= 3:
+                out.append(Obstacle(vertices=hull, r=radius, net=0, label=shape.label))
             else:
-                out.extend(discs_along_arc(arc, radius, net=0, label="board edge"))
+                for i in range(len(vertices) - 1):
+                    out.append(track_obstacle(*vertices[i], *vertices[i + 1],
+                                              radius, 0, shape.label))
     return out
+
+
+def _convex_hull(points):
+    """Andrew's monotone chain. Obstacles must be convex for the tangent construction."""
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return tuple(pts)
+
+    def half(seq):
+        out = []
+        for p in seq:
+            while len(out) >= 2:
+                (ax, ay), (bx, by) = out[-2], out[-1]
+                if (bx - ax) * (p[1] - ay) - (by - ay) * (p[0] - ax) <= 0:
+                    out.pop()
+                else:
+                    break
+            out.append(p)
+        return out
+
+    lower = half(pts)
+    upper = half(reversed(pts))
+    return tuple(lower[:-1] + upper[:-1])
 
 
 def _board_boundary(board: Board):
@@ -114,45 +142,42 @@ def _board_boundary(board: Board):
     return shapes
 
 
-def _solve_lazily(start, goal, discs: list[Disc], boundary=None,
+def _solve_lazily(start, goal, obstacles: list[Obstacle], boundary=None,
                   boundary_gap: float = 0.0, max_rounds: int = 8):
     """Solve against a nearby subset, then add back whatever the path actually hits.
 
-    A taut path is shaped only by obstacles close to it, but the tangent graph is cubic in
-    the disc count, so handing it every disc on the board is ruinous -- 256 s for one small
-    board. Starting local and repairing converges in a handful of rounds and gives exactly
-    the same answer, because the loop exits only when no disc is violated at all.
+    A taut path is shaped only by obstacles close to it, but the tangent graph is quadratic in
+    the wrap-circle count, so handing it every obstacle on the board is ruinous. Starting
+    local and repairing converges in a handful of rounds and gives the same answer, because
+    the loop exits only when nothing at all is violated.
     """
     sx, sy = start
     gx, gy = goal
     dx, dy = gx - sx, gy - sy
     span_sq = dx * dx + dy * dy
-
-    # Start from a narrow corridor around the straight line. Aggressive pruning is free:
-    # whatever the path actually hits gets added back below, and the loop exits only when
-    # nothing is violated -- so the answer never depends on how tight the corridor was.
     corridor = max(math.sqrt(span_sq) * 0.12, 3_000_000.0)
 
-    def near(disc: Disc) -> bool:
+    def near(obstacle: Obstacle) -> bool:
+        ox, oy = obstacle.centre
+        limit = corridor + obstacle.reach
         if span_sq <= 0.0:
-            return math.hypot(disc.x - sx, disc.y - sy) <= corridor + disc.r
-        t = max(0.0, min(1.0, ((disc.x - sx) * dx + (disc.y - sy) * dy) / span_sq))
-        return math.hypot(disc.x - (sx + t * dx),
-                          disc.y - (sy + t * dy)) <= corridor + disc.r
+            return math.hypot(ox - sx, oy - sy) <= limit
+        t = max(0.0, min(1.0, ((ox - sx) * dx + (oy - sy) * dy) / span_sq))
+        return math.hypot(ox - (sx + t * dx), oy - (sy + t * dy)) <= limit
 
-    active = [d for d in discs if near(d)]
-    active_ids = {id(d) for d in active}
+    active = [o for o in obstacles if near(o)]
+    active_ids = {id(o) for o in active}
 
     for _ in range(max_rounds):
         path = solve(start, goal, active, boundary=boundary, boundary_gap=boundary_gap)
-        fresh = [discs[i] for i in violated_discs(path, discs)
-                 if id(discs[i]) not in active_ids]
+        fresh = [obstacles[i] for i in violated_obstacles(path, obstacles)
+                 if id(obstacles[i]) not in active_ids]
         if not fresh:
             return path
         active.extend(fresh)
-        active_ids.update(id(d) for d in fresh)
+        active_ids.update(id(o) for o in fresh)
 
-    return solve(start, goal, discs, boundary=boundary, boundary_gap=boundary_gap)
+    return solve(start, goal, obstacles, boundary=boundary, boundary_gap=boundary_gap)
 
 
 def _mst_edges(pads: list[Pad]) -> list[tuple[int, int]]:
@@ -174,47 +199,79 @@ def _mst_edges(pads: list[Pad]) -> list[tuple[int, int]]:
     return edges
 
 
+#: An arc flatter than this is emitted as a straight segment instead.
+#:
+#: KiCad stores an arc as three points and rebuilds the circle from them. When the arc is
+#: nearly flat those three points are nearly collinear, and the reconstruction is violently
+#: ill-conditioned: a nanometre of rounding can change the radius by a large factor and flip
+#: the sweep direction, turning a 12 um sliver into copper that loops most of the way round a
+#: circle and shorts whatever it crosses. Our own model never sees it, because our model has
+#: the arc we intended.
+#:
+#: Five microns of sagitta is two orders of magnitude below any clearance rule on a board, so
+#: replacing such an arc with its chord is geometrically invisible and numerically safe.
+MIN_SAGITTA_NM = 5_000
+
+#: Copper shorter than this is dropped outright.
+MIN_PIECE_NM = 1_000
+
+
 def _path_to_tracks(path: TautPath, net: int, layer: str, width_nm: int) -> list:
     out: list = []
     for element in path.elements:
         if isinstance(element, PathLine):
-            if element.length < 1.0:
+            if element.length < MIN_PIECE_NM:
                 continue
             out.append(Track(net=net, layer=layer,
                              x1=int(round(element.x1)), y1=int(round(element.y1)),
                              x2=int(round(element.x2)), y2=int(round(element.y2)),
                              width_nm=width_nm))
-        else:
-            if element.length < 1.0:
+            continue
+
+        if element.length < MIN_PIECE_NM:
+            continue
+
+        sx, sy = element.start
+        mx, my = element.mid
+        ex, ey = element.end
+        sagitta = element.r * (1.0 - math.cos(abs(element.sweep) / 2.0))
+        if sagitta < MIN_SAGITTA_NM:
+            if math.hypot(ex - sx, ey - sy) < MIN_PIECE_NM:
                 continue
-            sx, sy = element.start
-            mx, my = element.mid
-            ex, ey = element.end
-            out.append(ArcTrack(net=net, layer=layer,
-                                x1=int(round(sx)), y1=int(round(sy)),
-                                xm=int(round(mx)), ym=int(round(my)),
-                                x2=int(round(ex)), y2=int(round(ey)),
-                                width_nm=width_nm, length_nm=element.length))
+            out.append(Track(net=net, layer=layer,
+                             x1=int(round(sx)), y1=int(round(sy)),
+                             x2=int(round(ex)), y2=int(round(ey)),
+                             width_nm=width_nm))
+            continue
+
+        out.append(ArcTrack(net=net, layer=layer,
+                            x1=int(round(sx)), y1=int(round(sy)),
+                            xm=int(round(mx)), ym=int(round(my)),
+                            x2=int(round(ex)), y2=int(round(ey)),
+                            width_nm=width_nm, length_nm=element.length))
     return out
 
 
-def _track_discs(tracks: list, radius: float, net: int) -> list[Disc]:
-    """Turn finished copper into obstacle discs for whatever is routed next."""
+def _track_obstacles(tracks: list, radius: float, net: int) -> list[Obstacle]:
+    """Finished copper as keep-outs.
+
+    A straight track is a single capsule -- two wrap circles instead of the forty-odd discs a
+    chain of them needed, and a tighter fit into the bargain.
+    """
     from .geometry import Arc as GeoArc
 
-    out: list[Disc] = []
+    out: list[Obstacle] = []
     for track in tracks:
         if isinstance(track, Track):
-            out.extend(discs_along_segment(track.x1, track.y1, track.x2, track.y2,
-                                           radius, net))
+            out.append(track_obstacle(track.x1, track.y1, track.x2, track.y2, radius, net))
         else:
             arc = GeoArc.from_three_points(track.x1, track.y1, track.xm, track.ym,
                                            track.x2, track.y2)
             if arc.degenerate:
-                out.extend(discs_along_segment(track.x1, track.y1, track.x2, track.y2,
-                                               radius, net))
+                out.append(track_obstacle(track.x1, track.y1, track.x2, track.y2,
+                                          radius, net))
             else:
-                out.extend(discs_along_arc(arc, radius, net))
+                out.extend(arc_obstacle(arc, radius, net))
     return out
 
 
@@ -239,19 +296,28 @@ def route_board(board: Board, layers: list[str] | None = None,
     # Static obstacles are the same for every connection sharing a netclass, so they are
     # built once and cached. Rebuilding them per connection was most of the first version's
     # runtime.
-    pad_cache: dict[tuple[str, int, int], list[Disc]] = {}
+    pad_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
+    graphic_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
     boundary = _board_boundary(board)
 
-    def pads_for(layer: str, clearance: int, half: float) -> list[Disc]:
+    def pads_for(layer: str, clearance: int, half: float) -> list[Obstacle]:
         key = (layer, int(clearance), int(half))
         cached = pad_cache.get(key)
         if cached is None:
-            cached = [pad_disc(pad, clearance, half) for pad in board.pads
+            cached = [pad_obstacle(pad, clearance, half) for pad in board.pads
                       if pad.on_layer(layer)]
             pad_cache[key] = cached
         return cached
 
-    routed_copper: dict[str, list[Disc]] = {layer: [] for layer in usable}
+    def graphics_for(layer: str, clearance: float, half: float) -> list[Obstacle]:
+        key = (layer, int(clearance), int(half))
+        cached = graphic_cache.get(key)
+        if cached is None:
+            cached = _copper_shape_obstacles(board, layer, clearance + half)
+            graphic_cache[key] = cached
+        return cached
+
+    routed_copper: dict[str, list[Obstacle]] = {layer: [] for layer in usable}
 
     connections: list[tuple[Net, Pad, Pad, float]] = []
     for net in board.routable:
@@ -265,7 +331,7 @@ def route_board(board: Board, layers: list[str] | None = None,
     for index, (net, pad_a, pad_b, _span) in enumerate(connections, 1):
         netclass = board.netclass_for(net.name)
         width = netclass.track_width_nm
-        clearance = netclass.clearance_nm
+        clearance = netclass.clearance_nm * (1.0 + CLEARANCE_MARGIN)
         half = width / 2.0 + GUARDBAND_NM
         # Track-to-track: two centrelines this far apart leave a full clearance between their
         # *edges*, so the halo carries a whole track width, not half of one. Using half was
@@ -287,6 +353,7 @@ def route_board(board: Board, layers: list[str] | None = None,
         for layer in candidates:
             blockers = [d for d in pads_for(layer, clearance, half) if d.net != net.code]
             blockers.extend(d for d in routed_copper[layer] if d.net != net.code)
+            blockers.extend(graphics_for(layer, clearance, half))
             try:
                 path = _solve_lazily((float(pad_a.x), float(pad_a.y)),
                                      (float(pad_b.x), float(pad_b.y)), blockers,
@@ -307,7 +374,7 @@ def route_board(board: Board, layers: list[str] | None = None,
         tracks = _path_to_tracks(path, net.code, layer, width)
         result.tracks.extend(tracks)
         result.routed.append((net.code, net.name))
-        routed_copper[layer].extend(_track_discs(tracks, halo, net.code))
+        routed_copper[layer].extend(_track_obstacles(tracks, halo, net.code))
         if verbose:
             print(f"  [{index}/{len(connections)}] {net.name} on {layer}: "
                   f"{_length / 1e6:.1f}mm, {len(tracks)} pieces")
