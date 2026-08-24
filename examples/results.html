@@ -1,0 +1,1356 @@
+<title>Taut String Router</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  :root {
+    --ground:  #12130F;
+    --surface: #1B1D17;
+    --raised:  #23261E;
+    --ink:     #E6E7DF;
+    --muted:   #9A9E90;
+    --hair:    #33372B;
+    --copper:  #C87D4A;
+    --front:   #C83434;
+    --back:    #4D7FC4;
+    --ok:      #8FBA76;
+    --warn:    #D6AE33;
+    --plate:   #F4F3EC;
+
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans:  "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono:  "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    --measure: 66ch;
+  }
+
+  :root[data-theme="light"] {
+    --ground:  #EEEDE4;
+    --surface: #F7F6F0;
+    --raised:  #FFFFFF;
+    --ink:     #1A1C14;
+    --muted:   #5C6153;
+    --hair:    #D3D2C4;
+    --copper:  #97521F;
+    --ok:      #46702F;
+    --warn:    #8A6A08;
+    --plate:   #FFFFFF;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --ground:  #EEEDE4;
+      --surface: #F7F6F0;
+      --raised:  #FFFFFF;
+      --ink:     #1A1C14;
+      --muted:   #5C6153;
+      --hair:    #D3D2C4;
+      --copper:  #97521F;
+      --ok:      #46702F;
+      --warn:    #8A6A08;
+      --plate:   #FFFFFF;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(2rem, 5vw, 4.5rem) clamp(1rem, 4vw, 2.5rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2.5rem, 5vw, 4rem);
+  }
+
+  /* ---------------------------------------------------------------- masthead */
+
+  .masthead { display: flex; flex-direction: column; gap: 1.25rem; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--copper);
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(2.1rem, 5.5vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .thesis {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: clamp(1.05rem, 2.2vw, 1.3rem);
+    line-height: 1.5;
+    color: var(--muted);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  .runmeta {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--hair);
+  }
+  .runmeta b { color: var(--ink); font-weight: 500; }
+
+  /* ---------------------------------------------------------------- cards */
+
+  .results { display: flex; flex-direction: column; gap: 2rem; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.1rem 1.4rem;
+    border-bottom: 1px solid var(--hair);
+    flex-wrap: wrap;
+  }
+
+  .seq {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--ground);
+    background: var(--copper);
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+  }
+  .card-head h3 {
+    font-family: var(--serif);
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+
+  .layers {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin: 0.1rem 0 0;
+  }
+
+  .chip {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    padding: 0.28rem 0.7rem;
+    border-radius: 2px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .chip.ok   { color: var(--ok); }
+  .chip.warn { color: var(--warn); }
+
+  .plate {
+    margin: 0;
+    padding: clamp(1rem, 3vw, 2rem);
+    background: var(--plate);
+    display: flex;
+    justify-content: center;
+    border-bottom: 1px solid var(--hair);
+  }
+
+  .render {
+    width: 100%;
+    max-width: 640px;
+    height: auto;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1px;
+    margin: 0;
+    background: var(--hair);
+  }
+
+  .stat {
+    background: var(--surface);
+    padding: 0.9rem 1.2rem;
+  }
+  .stat dt {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .stat dd {
+    font-family: var(--mono);
+    font-size: 1.15rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    margin: 0.25rem 0 0;
+  }
+  .stat.good dd { color: var(--ok); }
+  .stat.bad dd  { color: var(--front); }
+  .stat.warn dd { color: var(--warn); }
+
+  .failures {
+    padding: 1.2rem 1.4rem;
+    border-top: 1px solid var(--hair);
+  }
+  .failures h4 {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--warn);
+    margin: 0 0 0.7rem;
+  }
+  .failures ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
+  .failures li {
+    display: flex;
+    gap: 1rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    flex-wrap: wrap;
+  }
+  .failures .net { color: var(--ink); min-width: 12ch; }
+  .failures .why { color: var(--muted); }
+  .note {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin: 0.9rem 0 0;
+    max-width: var(--measure);
+  }
+
+  /* ---------------------------------------------------------------- prose */
+
+  section h2 {
+    font-family: var(--serif);
+    font-size: clamp(1.4rem, 3vw, 1.8rem);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+
+  section p, section li { max-width: var(--measure); }
+  section p { margin: 0 0 1rem; }
+
+  .lede { font-size: 1.05rem; }
+
+  .formula {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    background: var(--raised);
+    border-left: 2px solid var(--copper);
+    padding: 1rem 1.2rem;
+    margin: 1.4rem 0;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+
+  .legend {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    margin-top: 0.6rem;
+  }
+  .swatch {
+    display: inline-block;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 2px;
+    margin-right: 0.45rem;
+    vertical-align: -0.05rem;
+  }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.7rem; }
+  ul.plain li {
+    padding-left: 1.2rem;
+    position: relative;
+  }
+  ul.plain li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.62em;
+    width: 0.45rem;
+    height: 1px;
+    background: var(--copper);
+  }
+
+  strong { font-weight: 600; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--raised);
+    padding: 0.1em 0.35em;
+    border-radius: 2px;
+  }
+
+  footer {
+    border-top: 1px solid var(--hair);
+    padding-top: 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: var(--muted);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .card { transition: border-color 160ms ease; }
+    .card:hover { border-color: var(--copper); }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <span class="eyebrow">Optimal Prime &middot; MVP</span>
+    <h1>A rubber band, not a grid</h1>
+    <p class="thesis">Stretch a band between two pads and let it pull taut around whatever is in
+      the way. The shape it settles into is made of straight lines and circular arcs, and
+      nothing else &mdash; which happens to be exactly what a KiCad board file can hold.</p>
+    <div class="runmeta">
+      <span>engine <b>KiCad 9.0.7</b></span>
+      <span>boards <b>KiCad demo set</b></span>
+      <span>arcs placed <b>26</b></span>
+      <span>verdict by <b>kicad-cli pcb drc</b></span>
+    </div>
+  </header>
+
+  <section class="results">
+    <h2>Results</h2>
+    <p>Same board twice. The first run may use only the front copper; the second may also use
+      the back. Everything is judged by KiCad&rsquo;s own DRC &mdash; there is no internal
+      checker marking its own homework.</p>
+    <div class="legend">
+      <span><span class="swatch" style="background:#C83434"></span>front copper</span>
+      <span><span class="swatch" style="background:#4D7FC4"></span>back copper</span>
+      <span><span class="swatch" style="background:#D0D2CD"></span>board outline</span>
+    </div>
+    
+    <article class="card" id="01-single-layer">
+      <header class="card-head">
+        <span class="seq">01</span>
+        <div>
+          <h3>ecc83-pp</h3>
+          <p class="layers">F.Cu</p>
+        </div>
+        <span class="chip warn">DRC clean, routing incomplete</span>
+      </header>
+      <figure class="plate"><svg class="render" preserveAspectRatio="xMidYMid meet"
+  xmlns:svg="http://www.w3.org/2000/svg"
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  version="1.1"
+  viewBox="0.0000 0.0000 55.8038 49.4284">
+<title>SVG Image created as 01-single-layer.svg date 2026/08/23 22:40:26 </title>
+  <desc>Image generated by PCBNEW </desc>
+<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;
+stroke-linecap:round; stroke-linejoin:round;"
+ transform="translate(0 0) scale(1 1)">
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 23.7064,10.5885
+21.7064,10.5885
+21.7064,8.5885
+23.7064,8.5885
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="4.5885" r="1.0000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="29.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="17.8435" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="25.4635" r="0.8000" /> 
+<circle cx="37.3114" cy="5.7785" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.6914" cy="5.7785" r="0.8000" /> 
+<circle cx="45.5664" cy="27.3685" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="34.9885" r="0.8000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,21.1695
+10.8714,21.1695
+10.8714,24.1695
+7.8714,24.1695
+Z" /> 
+<circle cx="9.3714" cy="27.6695" r="1.5000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,9.1045
+10.8714,9.1045
+10.8714,12.1045
+7.8714,12.1045
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="15.6045" r="1.5000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 25.1434,42.5845
+25.1434,39.5845
+28.1434,39.5845
+28.1434,42.5845
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="31.6434" cy="41.0845" r="1.5000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="15.0864" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="7.4664" cy="34.9885" r="0.8000" /> 
+<circle cx="33.7764" cy="28.3585" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="25.4285" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="30.3264" cy="17.7085" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="25.3885" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="28.3585" r="1.0150" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 48.9714,16.8035
+45.9714,16.8035
+45.9714,13.8035
+48.9714,13.8035
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="10.3035" r="1.5000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:none; 
+stroke:#C83434; stroke-width:0.8000; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M31.6434 41.0845
+L31.5391 28.3769
+" />
+<path d="M31.6018 27.8321 A2.2373 2.2373 0.0 0 0 31.5391 28.3769" />
+<path d="M31.6018 27.8321
+L33.7764 18.8485
+" />
+<path d="M29.6914 5.7785
+L47.4714 15.3035
+" />
+<path d="M47.4714 15.3035
+L47.4998 27.3640
+" />
+<path d="M47.4365 27.8590 A1.9334 1.9334 0.0 0 0 47.4998 27.3640" />
+<path d="M47.4365 27.8590
+L45.5664 34.9885
+" />
+<path d="M22.7064 4.5885
+L9.3714 15.6045
+" />
+<path d="M45.5664 27.3685
+L28.2205 7.0332
+" />
+<path d="M28.1082 6.8881 A1.9327 1.9327 0.0 0 0 28.2205 7.0332" />
+<path d="M29.6914 3.8451 A1.9334 1.9334 0.0 0 0 28.1082 6.8881" />
+<path d="M30.6725 4.1125 A1.9334 1.9334 0.0 0 0 29.6914 3.8451" />
+<path d="M30.6725 4.1125
+L36.3303 7.4445
+" />
+<path d="M36.3303 7.4445 A0.4346 0.4346 0.0 0 0 36.3318 7.4453" />
+<path d="M36.3318 7.4453 A1.9175 1.9175 0.0 0 0 36.3403 7.4503" />
+<path d="M36.3403 7.4503 A1.9902 1.9902 0.0 0 0 36.3521 7.4571" />
+<path d="M36.3521 7.4571 A1.9334 1.9334 0.0 0 0 36.5640 7.5616" />
+<path d="M36.5640 7.5616 A1.9333 1.9333 0.0 0 0 36.8438 7.6545" />
+<path d="M36.8438 7.6545
+L47.4714 10.3035
+" />
+<path d="M15.0864 34.9885
+L12.1248 26.6872
+" />
+<path d="M12.1248 26.6872 A2.9233 2.9233 0.0 0 0 11.7430 25.9603" />
+<path d="M11.7430 25.9603
+L9.3714 22.6695
+" />
+<path d="M22.7064 9.5885
+L24.6930 5.5708
+" />
+<path d="M24.6930 5.5708 A2.2162 2.2162 0.0 0 0 21.4995 2.7297" />
+<path d="M21.4995 2.7297
+L9.3714 10.6045
+" />
+<path d="M26.6434 41.0845
+L26.8664 28.3585
+" />
+<path d="M9.3714 15.6045
+L6.7101 21.4599
+" />
+<path d="M6.7101 21.4599 A2.9233 2.9233 0.0 0 0 6.9998 24.3787" />
+<path d="M6.9998 24.3787
+L9.3714 27.6695
+" />
+<path d="M24.7164 21.7785
+L22.9606 24.0018
+" />
+<path d="M22.9606 24.0018 A2.2374 2.2374 0.0 0 0 22.5345 24.8934" />
+<path d="M22.5345 24.8934 A2.2356 2.2356 0.0 0 0 22.5229 24.9474" />
+<path d="M22.5229 24.9474 A2.2374 2.2374 0.0 0 0 22.4859 25.5646" />
+<path d="M22.4859 25.5646
+L23.7292 41.3145
+" />
+<path d="M23.7292 41.3145 A2.9251 2.9251 0.0 0 0 23.7353 41.3824" />
+<path d="M23.7353 41.3824 A2.9233 2.9233 0.0 0 0 24.0166 42.3673" />
+<path d="M24.0166 42.3673 A2.9233 2.9233 0.0 0 0 25.0876 43.5594" />
+<path d="M25.0876 43.5594 A2.9233 2.9233 0.0 0 0 26.6434 44.0078" />
+<path d="M26.6434 44.0078
+L31.6434 44.0078
+" />
+<path d="M31.6434 44.0078 A2.9233 2.9233 0.0 0 0 34.5610 40.9020" />
+<path d="M34.5610 40.9020
+L33.7764 28.3585
+" />
+<path d="M22.7064 9.5885
+L26.8664 18.8485
+" />
+<path d="M45.5664 27.3685
+L35.9264 25.4285
+" />
+<path d="M17.3724 17.8435
+L24.7164 21.7785
+" />
+<path d="M9.3714 27.6695
+L7.4664 34.9885
+" />
+<path d="M18.2614 29.9885
+L17.3724 25.4635
+" />
+<path d="M33.7764 18.8485
+L30.3264 17.7085
+" />
+<path d="M18.2614 34.9885
+L15.0864 34.9885
+" />
+</g>
+<g style="fill:none; 
+stroke:#D0D2CD; stroke-width:0.1270; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M54.4564 0.0635
+L54.4564 46.4185
+" />
+<path d="M2.3864 0.0635
+L2.3864 46.4185
+" />
+<path d="M54.4564 0.0635
+L2.3864 0.0635
+" />
+<path d="M2.3864 46.4185
+L54.4564 46.4185
+" />
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="9.5885" r="0.5000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="4.5885" r="0.5000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="29.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="3.8735" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="3.8735" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="42.6085" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="17.8435" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="25.4635" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="37.3114" cy="5.7785" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.6914" cy="5.7785" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="27.3685" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="22.6695" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="27.6695" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="10.6045" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="15.6045" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.6434" cy="41.0845" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="31.6434" cy="41.0845" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="15.0864" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="7.4664" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="28.3585" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="25.4285" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="21.7785" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="18.8485" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="30.3264" cy="17.7085" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="18.8485" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="21.7785" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="25.3885" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="28.3585" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="15.3035" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="10.3035" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="42.6085" r="1.6000" /> 
+</g> 
+</svg>
+</figure>
+      <dl class="stats"><div class="stat"><dt>connections routed</dt><dd>17 / 20</dd></div><div class="stat good"><dt>DRC errors</dt><dd>0</dd></div><div class="stat warn"><dt>unconnected</dt><dd>3</dd></div><div class="stat"><dt>arcs</dt><dd>21</dd></div><div class="stat"><dt>copper</dt><dd>289.1 mm</dd></div><div class="stat"><dt>time</dt><dd>33.1 s</dd></div></dl>
+      <div class="failures"><h4>Could not route</h4><ul><li><span class='net'>Net-(U1B-K)</span><span class='why'>no collision-free taut path between the endpoints</span></li><li><span class='net'>Net-(U1A-K)</span><span class='why'>no collision-free taut path between the endpoints</span></li><li><span class='net'>GND</span><span class='why'>no collision-free taut path between the endpoints</span></li></ul><p class="note">A single layer is not enough for this board. Example 02 is the same board with the back copper allowed.</p></div>
+    </article>
+
+    <article class="card" id="02-two-layer">
+      <header class="card-head">
+        <span class="seq">02</span>
+        <div>
+          <h3>ecc83-pp</h3>
+          <p class="layers">F.Cu + B.Cu</p>
+        </div>
+        <span class="chip ok">DRC clean</span>
+      </header>
+      <figure class="plate"><svg class="render" preserveAspectRatio="xMidYMid meet"
+  xmlns:svg="http://www.w3.org/2000/svg"
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  version="1.1"
+  viewBox="0.0000 0.0000 55.8038 49.4284">
+<title>SVG Image created as 02-two-layer.svg date 2026/08/23 22:40:34 </title>
+  <desc>Image generated by PCBNEW </desc>
+<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;
+stroke-linecap:round; stroke-linejoin:round;"
+ transform="translate(0 0) scale(1 1)">
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 23.7064,10.5885
+21.7064,10.5885
+21.7064,8.5885
+23.7064,8.5885
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="4.5885" r="1.0000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="29.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="17.8435" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="25.4635" r="0.8000" /> 
+<circle cx="37.3114" cy="5.7785" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.6914" cy="5.7785" r="0.8000" /> 
+<circle cx="45.5664" cy="27.3685" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="34.9885" r="0.8000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,21.1695
+10.8714,21.1695
+10.8714,24.1695
+7.8714,24.1695
+Z" /> 
+<circle cx="9.3714" cy="27.6695" r="1.5000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,9.1045
+10.8714,9.1045
+10.8714,12.1045
+7.8714,12.1045
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="15.6045" r="1.5000" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 25.1434,42.5845
+25.1434,39.5845
+28.1434,39.5845
+28.1434,42.5845
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="31.6434" cy="41.0845" r="1.5000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="15.0864" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="7.4664" cy="34.9885" r="0.8000" /> 
+<circle cx="33.7764" cy="28.3585" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="25.4285" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="30.3264" cy="17.7085" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="25.3885" r="1.0150" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="28.3585" r="1.0150" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 48.9714,16.8035
+45.9714,16.8035
+45.9714,13.8035
+48.9714,13.8035
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="10.3035" r="1.5000" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:none; 
+stroke:#C83434; stroke-width:0.8000; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M31.6434 41.0845
+L31.5391 28.3769
+" />
+<path d="M31.6018 27.8321 A2.2373 2.2373 0.0 0 0 31.5391 28.3769" />
+<path d="M31.6018 27.8321
+L33.7764 18.8485
+" />
+<path d="M29.6914 5.7785
+L47.4714 15.3035
+" />
+<path d="M47.4714 15.3035
+L47.4998 27.3640
+" />
+<path d="M47.4365 27.8590 A1.9334 1.9334 0.0 0 0 47.4998 27.3640" />
+<path d="M47.4365 27.8590
+L45.5664 34.9885
+" />
+<path d="M22.7064 4.5885
+L9.3714 15.6045
+" />
+<path d="M15.0864 34.9885
+L12.1248 26.6872
+" />
+<path d="M12.1248 26.6872 A2.9233 2.9233 0.0 0 0 11.7430 25.9603" />
+<path d="M11.7430 25.9603
+L9.3714 22.6695
+" />
+<path d="M26.6434 41.0845
+L26.8664 28.3585
+" />
+<path d="M9.3714 15.6045
+L6.7101 21.4599
+" />
+<path d="M6.7101 21.4599 A2.9233 2.9233 0.0 0 0 6.9998 24.3787" />
+<path d="M6.9998 24.3787
+L9.3714 27.6695
+" />
+<path d="M22.7064 9.5885
+L26.8664 18.8485
+" />
+<path d="M45.5664 27.3685
+L35.9264 25.4285
+" />
+<path d="M17.3724 17.8435
+L24.7164 21.7785
+" />
+<path d="M9.3714 27.6695
+L7.4664 34.9885
+" />
+<path d="M17.3724 25.4635
+L24.7164 25.3885
+" />
+<path d="M22.7064 4.5885
+L29.6914 5.7785
+" />
+<path d="M18.2614 29.9885
+L17.3724 25.4635
+" />
+<path d="M33.7764 18.8485
+L30.3264 17.7085
+" />
+<path d="M18.2614 34.9885
+L15.0864 34.9885
+" />
+<path style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 23.7064,10.5885
+21.7064,10.5885
+21.7064,8.5885
+23.7064,8.5885
+Z" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="4.5885" r="1.0000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="29.9885" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="3.8735" r="2.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="17.8435" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="25.4635" r="0.8000" /> 
+<circle cx="37.3114" cy="5.7785" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.6914" cy="5.7785" r="0.8000" /> 
+<circle cx="45.5664" cy="27.3685" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="34.9885" r="0.8000" /> 
+<path style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,21.1695
+10.8714,21.1695
+10.8714,24.1695
+7.8714,24.1695
+Z" /> 
+<circle cx="9.3714" cy="27.6695" r="1.5000" /> 
+<path style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 7.8714,9.1045
+10.8714,9.1045
+10.8714,12.1045
+7.8714,12.1045
+Z" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="15.6045" r="1.5000" /> 
+<path style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 25.1434,42.5845
+25.1434,39.5845
+28.1434,39.5845
+28.1434,42.5845
+Z" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="31.6434" cy="41.0845" r="1.5000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="15.0864" cy="34.9885" r="0.8000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="7.4664" cy="34.9885" r="0.8000" /> 
+<circle cx="33.7764" cy="28.3585" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="25.4285" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="30.3264" cy="17.7085" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="18.8485" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="21.7785" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="25.3885" r="1.0150" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="28.3585" r="1.0150" /> 
+<path style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 48.9714,16.8035
+45.9714,16.8035
+45.9714,13.8035
+48.9714,13.8035
+Z" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="10.3035" r="1.5000" /> 
+</g>
+<g style="fill:#4D7FC4; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="42.6085" r="2.8000" /> 
+</g>
+<g style="fill:none; 
+stroke:#4D7FC4; stroke-width:0.8000; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M45.5664 27.3685
+L44.5587 15.5519
+" />
+<path d="M45.0998 13.5943 A2.9233 2.9233 0.0 0 0 44.5587 15.5519" />
+<path d="M45.0998 13.5943
+L47.4714 10.3035
+" />
+<path d="M37.3114 5.7785
+L35.9264 21.7785
+" />
+<path d="M22.7064 9.5885
+L9.3714 10.6045
+" />
+<path d="M24.7164 21.7785
+L33.7764 28.3585
+" />
+</g>
+<g style="fill:none; 
+stroke:#D0D2CD; stroke-width:0.1270; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M54.4564 0.0635
+L54.4564 46.4185
+" />
+<path d="M2.3864 0.0635
+L2.3864 46.4185
+" />
+<path d="M54.4564 0.0635
+L2.3864 0.0635
+" />
+<path d="M2.3864 46.4185
+L54.4564 46.4185
+" />
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="9.5885" r="0.5000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="22.7064" cy="4.5885" r="0.5000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="18.2614" cy="29.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="3.8735" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="3.8735" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="50.6464" cy="42.6085" r="1.6000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="17.8435" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.3724" cy="25.4635" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="37.3114" cy="5.7785" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.6914" cy="5.7785" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="27.3685" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="45.5664" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="22.6695" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="27.6695" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="10.6045" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="9.3714" cy="15.6045" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.6434" cy="41.0845" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="31.6434" cy="41.0845" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="15.0864" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="7.4664" cy="34.9885" r="0.4000" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="28.3585" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="25.4285" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="35.9264" cy="21.7785" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="33.7764" cy="18.8485" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="30.3264" cy="17.7085" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="18.8485" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="21.7785" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="24.7164" cy="25.3885" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="26.8664" cy="28.3585" r="0.5100" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="15.3035" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="47.4714" cy="10.3035" r="0.7500" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="6.1964" cy="42.6085" r="1.6000" /> 
+</g> 
+</svg>
+</figure>
+      <dl class="stats"><div class="stat"><dt>connections routed</dt><dd>20 / 20</dd></div><div class="stat good"><dt>DRC errors</dt><dd>0</dd></div><div class="stat good"><dt>unconnected</dt><dd>0</dd></div><div class="stat"><dt>arcs</dt><dd>5</dd></div><div class="stat"><dt>copper</dt><dd>240.2 mm</dd></div><div class="stat"><dt>time</dt><dd>5.0 s</dd></div></dl>
+      
+    </article>
+
+    <article class="card" id="03-single-layer-complete">
+      <header class="card-head">
+        <span class="seq">03</span>
+        <div>
+          <h3>test_pads_inside_pads</h3>
+          <p class="layers">F.Cu</p>
+        </div>
+        <span class="chip ok">DRC clean</span>
+      </header>
+      <figure class="plate"><svg class="render" preserveAspectRatio="xMidYMid meet"
+  xmlns:svg="http://www.w3.org/2000/svg"
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  version="1.1"
+  viewBox="0.0000 0.0000 57.2770 47.9552">
+<title>SVG Image created as 03-single-layer-complete.svg date 2026/08/23 22:40:36 </title>
+  <desc>Image generated by PCBNEW </desc>
+<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;
+stroke-linecap:round; stroke-linejoin:round;"
+ transform="translate(0 0) scale(1 1)">
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="13.2800" cy="14.5230" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="13.2800" cy="17.6980" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.7250" cy="14.5230" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.7250" cy="17.6980" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="21.5350" cy="14.5230" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="21.5350" cy="17.6980" r="0.7620" /> 
+<path style="fill:#C83434; fill-opacity:1.0000; stroke:none;fill-rule:evenodd;"
+d="M 11.3750,32.3030
+11.3750,11.9830
+31.6950,11.9830
+31.6950,32.3030
+Z" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="25.3450" cy="14.5230" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="25.3450" cy="17.6980" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.7900" cy="14.5230" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.7900" cy="17.6980" r="0.7620" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="39.6960" cy="22.1430" r="2.0320" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="19.1220" cy="38.0180" r="2.0320" /> 
+</g>
+<g style="fill:#C83434; fill-opacity:1.0000; stroke:none;">
+<circle cx="39.0610" cy="38.0180" r="2.0320" /> 
+</g>
+<g style="fill:none; 
+stroke:#C83434; stroke-width:0.2032; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;">
+<path d="M19.1220 38.0180
+L39.0610 38.0180
+" />
+<path d="M29.7900 17.6980
+L39.6960 22.1430
+" />
+<path d="M13.2800 14.5230
+L17.7250 14.5230
+" />
+<path d="M21.5350 17.6980
+L21.5350 22.1430
+" />
+<path d="M25.3450 14.5230
+L29.7900 14.5230
+" />
+<path d="M17.7250 14.5230
+L21.5350 14.5230
+" />
+<path d="M21.5350 14.5230
+L25.3450 14.5230
+" />
+<path d="M13.2800 14.5230
+L13.2800 17.6980
+" />
+<path d="M17.7250 14.5230
+L17.7250 17.6980
+" />
+<path d="M21.5350 14.5230
+L21.5350 17.6980
+" />
+<path d="M25.3450 14.5230
+L25.3450 17.6980
+" />
+<path d="M29.7900 14.5230
+L29.7900 17.6980
+" />
+<path style="fill:none; 
+stroke:#D0D2CD; stroke-width:0.1000; stroke-opacity:1; 
+stroke-linecap:round; stroke-linejoin:round;fill:none"
+d="M 0.0500,0.0500
+57.2300,0.0500
+57.2300,47.9100
+0.0500,47.9100
+Z" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="13.2800" cy="14.5230" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="13.2800" cy="17.6980" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.7250" cy="14.5230" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="17.7250" cy="17.6980" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="21.5350" cy="14.5230" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="21.5350" cy="17.6980" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="25.3450" cy="14.5230" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="25.3450" cy="17.6980" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.7900" cy="14.5230" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="29.7900" cy="17.6980" r="0.3810" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="39.6960" cy="22.1430" r="1.5240" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="19.1220" cy="38.0180" r="1.5240" /> 
+</g>
+<g style="fill:#FFFFFF; fill-opacity:1.0000; stroke:none;">
+<circle cx="39.0610" cy="38.0180" r="1.5240" /> 
+</g> 
+</svg>
+</figure>
+      <dl class="stats"><div class="stat"><dt>connections routed</dt><dd>12 / 12</dd></div><div class="stat good"><dt>DRC errors</dt><dd>0</dd></div><div class="stat good"><dt>unconnected</dt><dd>0</dd></div><div class="stat"><dt>arcs</dt><dd>0</dd></div><div class="stat"><dt>copper</dt><dd>67.6 mm</dd></div><div class="stat"><dt>time</dt><dd>0.0 s</dd></div></dl>
+      
+    </article>
+  </section>
+
+  <section>
+    <h2>Why this shape</h2>
+    <p class="lede">Every obstacle &mdash; a pad, a finished track, the board edge &mdash; is
+      treated as something round to go around. The shortest path that avoids a set of circles
+      is a theorem, not a heuristic: it is a sequence of straight lines tangent to those
+      circles, joined by arcs riding on their surfaces.</p>
+    <p>That matters because a <code>.kicad_pcb</code> can hold precisely two kinds of copper:
+      <code>segment</code> and <code>arc</code>. The optimal geometry and the expressible
+      geometry are the same set, so nothing is snapped to a grid, rounded to 45&deg;, or
+      flattened into a polyline on the way out. The file holds the answer itself.</p>
+    <p>The check that it really is the taut string: a single obstacle between two points must
+      produce line&ndash;arc&ndash;line of exactly</p>
+    <pre class="formula">2&middot;&radic;(d&sup2; &minus; r&sup2;)  +  r&middot;(&pi; &minus; 2&middot;acos(r/d))</pre>
+    <p>It does, to one part in a million. Across 250 random obstacle fields the path never
+      enters an obstacle by more than 7&times;10&#8315;&sup1;&#8310; mm.</p>
+  </section>
+
+  <section>
+    <h2>What this does not do yet</h2>
+    <ul class="plain">
+      <li><strong>No vias.</strong> A connection is placed on whichever allowed layer gives the
+        shorter path, but it never changes layer part-way. Two surface pads on opposite faces
+        have no solution here.</li>
+      <li><strong>Obstacles are circles.</strong> A long rectangular pad is treated as the
+        circle that encloses it, which wastes space and occasionally refuses a connection that
+        would in fact fit. Rounded rectangles are the honest next step.</li>
+      <li><strong>Nets are routed one after another</strong>, each finished track becoming an
+        obstacle for the next, so the order still matters. Nothing negotiates or reroutes.</li>
+    </ul>
+    <p class="note">All three are known and none of them can produce an illegal board &mdash;
+      they cost completed connections, never correctness. When the router cannot find a legal
+      path it says so instead of laying copper anyway.</p>
+  </section>
+
+  <footer>
+    Routed with taut-string geometry &middot; verified by kicad-cli &middot; renders exported
+    straight from the routed board files
+  </footer>
+
+</div>

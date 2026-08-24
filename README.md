@@ -1,73 +1,76 @@
 # Optimal Prime
 
-Development and testing grounds for a next-generation autorouter — one that optimizes for
-what is *physically* optimal rather than for what is legible to a human eye. No preferred
-directions, no 45-degree dogma, no grid unless the grid earns its place.
+A taut-string autorouter for KiCad.
 
-## Current state: research phase
+Stretch a rubber band between two pads and let it pull tight around whatever is in the way.
+The shape it settles into is made of straight lines and circular arcs, and nothing else — no
+grid, no preferred direction, no 45-degree rule. Those are conventions for human legibility,
+and the copper does not need them.
 
-| Path | What it is |
-|---|---|
-| [`SYNTHESIS.md`](SYNTHESIS.md) | **Start here.** The full research synthesis: why routers look the way they do, what "optimal" can provably mean, a survey of every paradigm, the prior art, the cross-domain transplants worth making, and a proposed architecture. |
-| [`MVP-PLAN.md`](MVP-PLAN.md) | **The current work.** MVP-01: a routing optimizer for KiCad with placement, stackup and via type frozen and differential pairs deferred. Scope, architecture, the strategy tournament, the six-level test plan, the experimental protocol, and the phase-by-phase reading list. |
-| [`papers/INDEX.md`](papers/INDEX.md) | Annotated bibliography of all 116 archived papers, plus full citations for the paywalled works that could not be archived. |
-| [`papers/`](papers/) | The corpus itself, 116 PDFs in 15 thematic folders. |
+## The idea in one paragraph
 
-## The three-sentence version
+Every obstacle — a pad, a finished track, the board edge — is treated as something round to
+go around. The shortest path avoiding a set of circles is a theorem, not a heuristic: it is a
+sequence of straight lines tangent to those circles, joined by arcs riding on their surfaces.
+A `.kicad_pcb` holds exactly two kinds of copper, `segment` and `arc`, so the optimal geometry
+and the expressible geometry are the same set. Nothing is snapped, rounded, or flattened on
+the way out — the file holds the answer itself.
 
-Routing decomposes into topology selection (NP-hard, where all the difficulty lives),
-geometric embedding (polynomial and **exactly** solvable — the answer is a taut rubber band,
-which is any-angle for free), and physical refinement (continuous, (1+e) at best). Almost
-every shipping router conflates the first two by searching in geometry space on a grid,
-which throws away the exact result and buys nothing. The proposal is to search topology on a
-constrained Delaunay triangulation using Conflict-Based Search from the multi-agent
-path-finding literature, then let rubber-band relaxation produce provably optimal
-segment-and-arc geometry that Gerber can already express.
+## Results
 
-One commercial tool — Eremex TopoR, in continuous development since 1988 — already ships the
-triangulation-plus-topology-first half of that architecture. See SYNTHESIS section 3.2 for what
-it does, the two ideas worth taking from it, and the gaps that leave room for this project.
+Two runs on the same KiCad demo board, judged entirely by KiCad's own DRC.
 
-Full argument, with the complexity results that bound the claim, in [`SYNTHESIS.md`](SYNTHESIS.md).
+| board | layers | connections | arcs | copper | DRC errors | unconnected | time |
+|---|---|---|---|---|---|---|---|
+| `ecc83-pp` | F.Cu | 17 / 20 | 21 | 289.1 mm | **0** | 3 | 33 s |
+| `ecc83-pp` | F.Cu + B.Cu | **20 / 20** | 5 | 240.2 mm | **0** | **0** | 5 s |
+| `test_pads_inside_pads` | F.Cu | 12 / 12 | 0 | 67.6 mm | **0** | **0** | <1 s |
 
-## What is being built first
+The three unrouted nets in the first run are not a bug: `ecc83-pp` is a two-layer board and
+one layer is not enough for it. The second run is the same board with the back copper allowed,
+and it completes.
 
-MVP-01 is a single, falsifiable thing: given a `.kicad_pcb` with components already placed and
-the stackup fixed, route every net so that KiCad's own DRC reports zero errors — with no
-constraint that the geometry look human-drawn. Compute time is explicitly not a goal.
+Rendered results with the geometry visible: [`examples/results.html`](examples/results.html).
 
-Two things turned out to already exist, and MVP-01 is built around exploiting both:
-`kicad-cli pcb drc --format json` is a production DRC engine that understands arc tracks
-natively, and PCBWorld/PCBench supply hundreds of real open-source boards in native
-`.kicad_pcb` format with published baselines. So the harness comes first and the router second,
-and the first experiment to run is the one that could falsify the premise of this repository.
-See [`MVP-PLAN.md`](MVP-PLAN.md).
-
-## Running the arena
+## Running it
 
 ```bash
-python scripts/fetch_boards.py --source kicad-demos   # build the benchmark set
-python -m pytest tests/ -q                            # 40+ tests, incl. the DRC oracle
-python -c "from arena.runner import run_matrix; run_matrix(['S0','S1'], None, list(range(1,21)), tag='e2')"
-python scripts/report.py --tag e2                     # leaderboard + E2
+python run.py --board ecc83-pp --layers F.Cu,B.Cu
+python scripts/build_report.py          # regenerate the results page
+python -m pytest tests/ -q              # 21 tests
 ```
 
-Requires KiCad 9 (for `kicad-cli`) and Python 3.11+. Set `OPTIMAL_PRIME_KICAD_CLI` if
-`kicad-cli` is not on `PATH`.
+Needs KiCad 9 (for `kicad-cli`), Python 3.11+, and numpy. Boards come from KiCad's own
+installed demos. Set `KICAD_CLI` or `KICAD_DEMOS` if they are not in the default location.
+
+## As a KiCad plugin
+
+Copy [`plugin/`](plugin/) into `Documents/KiCad/9.0/plugins/`, enable the API server in
+Preferences → Plugins, and a **Route with taut strings** button appears in the PCB editor.
+The whole route lands as a single undo step.
+
+## Layout
 
 | Path | What it is |
 |---|---|
-| `arena/` | The measurement harness. No routing logic lives here. |
-| `strategies/` | One file per strategy, all implementing the same one-method interface. |
-| `scripts/fetch_boards.py` | Board ingestion: filter, normalise, strip, baseline, hash. |
-| `scripts/report.py` | Regenerates the leaderboard from run records. It is a view, not a file. |
-| `boards/` | Fetched benchmark instances (gitignored except the manifest). |
-| `results/runs/` | One self-describing JSON per (strategy, board, seed). |
+| [`taut/tangent.py`](taut/tangent.py) | **The algorithm.** Tangent graph over discs, Dijkstra, out come lines and arcs. |
+| [`taut/obstacles.py`](taut/obstacles.py) | Pads, tracks and board edges reduced to keep-out discs. |
+| [`taut/board.py`](taut/board.py) | Minimal `.kicad_pcb` reader — pads, layers, netclasses, outline. |
+| [`taut/route.py`](taut/route.py) | Routes a whole board, one connection at a time. |
+| [`taut/emit.py`](taut/emit.py) | Writes copper back as native `segment` and `arc`. |
+| [`taut/geometry.py`](taut/geometry.py) | Exact distance predicates for segments and arcs. |
+| [`run.py`](run.py) | Route a demo board, run DRC, render an SVG. |
+| [`SYNTHESIS.md`](SYNTHESIS.md) | The research this came out of: 116 papers on automatic routing. |
 
-## Notes
+## What it does not do yet
 
-- `papers/` is ~318 MB of PDFs. If this repository is pushed anywhere, put that directory
-  behind Git LFS or exclude it — see `.gitignore`.
-- Papers were collected from open-access sources only (arXiv, institutional repositories,
-  author pages, open-access journals, vendor and trade publications). Paywalled works are
-  cited but not redistributed; see section 16 of [`papers/INDEX.md`](papers/INDEX.md).
+- **No vias.** A connection goes on whichever allowed layer is shorter, but never changes
+  layer part-way. Two surface pads on opposite faces have no solution.
+- **Obstacles are circles.** A long rectangular pad is treated as its enclosing circle, which
+  wastes room and occasionally refuses a connection that would fit. Rounded rectangles are the
+  honest next step.
+- **Nets are routed one after another**, each finished track becoming an obstacle for the
+  next. Nothing negotiates, reroutes, or reconsiders an order.
+
+None of these can produce an illegal board — they cost completed connections, never
+correctness. When no legal path exists the router says so instead of laying copper anyway.
