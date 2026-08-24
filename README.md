@@ -9,9 +9,13 @@ and the copper does not need them.
 
 ## The idea in one paragraph
 
-Every obstacle — a pad, a finished track, a copper label, the board edge — is a convex shape
-grown outward by the clearance. The shortest path avoiding such shapes is a theorem, not a
-heuristic: straight lines tangent to them, joined by arcs riding on circles at their corners.
+Every obstacle — a pad, a copper label, the board edge — is a convex shape grown outward by
+the clearance. The shortest path avoiding such shapes is a theorem, not a heuristic: straight
+lines tangent to them, joined by arcs riding on circles at their corners.
+
+The copper is then settled as one arrangement rather than a sequence of decisions. Every band
+is re-solved against the *previous* positions of all the others and all of them move at once,
+so two bands contending for the same space both give way instead of the first one keeping it.
 A `.kicad_pcb` holds exactly two kinds of copper, `segment` and `arc`, so the optimal geometry
 and the expressible geometry are the same set. Nothing is snapped, rounded, or flattened on
 the way out — the file holds the answer itself.
@@ -22,31 +26,28 @@ Two runs on the same KiCad demo board, judged entirely by KiCad's own DRC.
 
 | board | layers | connections | arcs | copper | DRC errors | unconnected | time |
 |---|---|---|---|---|---|---|---|
-| `ecc83-pp` | F.Cu | 19 / 20 | 12 | 305.3 mm | **0** | 1 | 2.6 s |
-| `ecc83-pp` | F.Cu + B.Cu | **20 / 20** | 5 | 239.5 mm | **0** | **0** | 1.0 s |
-| `sonde xilinx` | F.Cu + B.Cu | 63 / 66 | 40 | 697.8 mm | **0** | 3 | 63 s |
+| `ecc83-pp` | F.Cu | **20 / 20** | 14 | 292.9 mm | **0** | **0** | 9 s |
+| `ecc83-pp` | F.Cu + B.Cu | **20 / 20** | 5 | 239.5 mm | **0** | **0** | 16 s |
+| `sonde xilinx` | F.Cu + B.Cu | 64 / 66 | 33 | 678.4 mm | **0** | 2 | 335 s |
 
-Nothing here is DRC-dirty. What varies is how much gets *finished*. When the router cannot
-find a legal path it reports the connection as unrouted rather than laying copper anyway.
+### One at a time, versus all together
 
-### Sequential versus bundle
+Via `python scripts/compare.py`:
 
-Both schemes on the same boards, via `python scripts/compare.py`:
+| board | scheme | connections | copper |
+|---|---|---|---|
+| `ecc83-pp` F.Cu | one at a time | 19 / 20 | 305.3 mm |
+| | **all together** | **20 / 20** | **292.9 mm** |
+| `ecc83-pp` F.Cu+B.Cu | one at a time | 20 / 20 | 239.5 mm |
+| | all together | 20 / 20 | 239.5 mm |
+| `sonde xilinx` | one at a time | 63 / 66 | 690.3 mm |
+| | **all together** | **64 / 66** | **678.4 mm** |
 
-| board | scheme | connections | copper | DRC | unconnected |
-|---|---|---|---|---|---|
-| `ecc83-pp` F.Cu | sequential | 19 / 20 | 305.3 mm | 0 | 1 |
-| | **bundle** | 19 / 20 | 305.3 mm | 0 | 1 |
-| `ecc83-pp` F.Cu+B.Cu | sequential | 20 / 20 | 239.5 mm | 0 | 0 |
-| | **bundle** | 20 / 20 | 239.5 mm | 0 | 0 |
-| `sonde xilinx` | sequential | 63 / 66 | 690.3 mm | 0 | 3 |
-| | **bundle** | 63 / 66 | 697.8 mm | 0 | 3 |
-
-**The bundle changes nothing on these boards**, and that is worth stating plainly. The
-mechanism is correct — `tests/test_bundle.py` proves it directly on the case it exists for:
-a gap that holds two tracks, one net alone sitting in the middle of it, and the second unable
-to fit until both are seated. None of these boards' remaining failures turn out to be that
-case.
+Where a board has any headroom, relaxing the bands together wins on *both* counts — more
+connections finished **and** less copper. That is the tell that it is doing the right thing: a
+band that had been taking the long way round something now goes through instead, and the band
+it used to detour around gives up a little of its own straightness to let it past. The
+two-layer case is unchanged because there was nothing to recover.
 
 Rendered results with the geometry visible: [`examples/results.html`](examples/results.html).
 
@@ -74,7 +75,8 @@ The whole route lands as a single undo step.
 | [`taut/tangent.py`](taut/tangent.py) | **The algorithm.** Tangent graph over the obstacles' corner circles, Dijkstra, out come lines and arcs. |
 | [`taut/obstacles.py`](taut/obstacles.py) | Pads, tracks and copper graphics as convex shapes inflated by the clearance. |
 | [`taut/board.py`](taut/board.py) | Minimal `.kicad_pcb` reader — pads, layers, netclasses, outline. |
-| [`taut/route.py`](taut/route.py) | Routes a whole board, one connection at a time. |
+| [`taut/relax.py`](taut/relax.py) | Settles every band at once, rather than one after another. |
+| [`taut/route.py`](taut/route.py) | Routes a whole board: shape each band alone, relax the set, settle what is left. |
 | [`taut/emit.py`](taut/emit.py) | Writes copper back as native `segment` and `arc`. |
 | [`taut/geometry.py`](taut/geometry.py) | Exact distance predicates for segments and arcs. |
 | [`run.py`](run.py) | Route a demo board, run DRC, render an SVG. |
@@ -84,13 +86,12 @@ The whole route lands as a single undo step.
 
 - **No vias.** A connection goes on whichever allowed layer is shorter, but never changes
   layer part-way. Two surface pads on opposite faces have no solution.
-- **Contention is only modelled inside gaps between two static obstacles.** Two nets running
-  alongside each other in open copper share no gap, so no slot assignment covers them and the
-  settling pass falls back to routing one against the other. That is why the bundle does not
-  yet move these boards.
-- **What blocks the remaining connections is unresolved.** They fail during settling, not for
-  want of a path in isolation, so they are contention failures — but whether a different
-  global arrangement would fit them, or whether they genuinely need a via, is not yet known.
+- **Relaxation is slow.** Each step re-solves every contended band against every other, on
+  every permitted layer. `sonde xilinx` takes about 5 minutes against 1 minute for settling
+  one at a time, and it runs under a wall-clock budget rather than to convergence.
+- **It is not guaranteed to converge**, and does not always: 2 connections on `sonde xilinx`
+  are still unrouted. Whether a different global arrangement would fit them, or whether they
+  genuinely need a via, is not yet known.
 
 None of these can produce an illegal board — they cost completed connections, never
 correctness. When no legal path exists the router says so instead of laying copper anyway.

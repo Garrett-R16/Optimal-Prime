@@ -1,4 +1,4 @@
-"""Side-by-side comparison of the sequential router and the bundle router.
+"""Side-by-side comparison of sequential settling and joint relaxation.
 
 Runs both on the same boards, in the same process, so the only thing that differs is the
 scheme. Writes ``results/comparison.json`` and prints the table.
@@ -87,9 +87,10 @@ def main() -> int:
         print(f"\n{label}")
         entry = {"board": name, "layers": layers}
 
-        for mode, use_bundle in (("sequential", False), ("bundle", True)):
+        for mode, use_bundle in (("sequential", False), ("relaxed", True)):
             started = time.monotonic()
-            result = route_board(board, layers=layers, bundle=use_bundle)
+            result = route_board(board, layers=layers, bundle=use_bundle,
+                                 relax_seconds=240)
             elapsed = time.monotonic() - started
             checked = score(cli, board, result, work, f"{name}-{mode}".replace(" ", "_"))
             stats = result.stats
@@ -113,7 +114,7 @@ def main() -> int:
           f"{'DRC':>5s} {'unconn':>7s} {'time':>8s}")
     for entry in rows:
         label = f"{entry['board']} [{'+'.join(entry['layers'])}]"
-        for mode in ("sequential", "bundle"):
+        for mode in ("sequential", "relaxed"):
             m = entry[mode]
             print(f"{label[:26]:26s} {mode[:6]:6s} "
                   f"{m['routed']:>4d}/{m['connections']:<5d} {m['arcs']:>6d} "
