@@ -10,33 +10,24 @@
       "F.Cu"
     ],
     "order": "longest-first",
-    "bundle": true,
     "connections": 20,
     "routed": 19,
     "failed": 1,
-    "tracks": 50,
+    "tracks": 48,
     "arcs": 12,
-    "length_mm": 305.34,
-    "sequential_length_mm": 239.52,
-    "bundle_portals": 18,
-    "bundle_shared": 10,
-    "bundle_oversubscribed": 0,
-    "bundle_reseated": 12,
-    "bundle_fallbacks": 6,
-    "bundle_passes": 2,
-    "bundle_dropped": 1
+    "length_mm": 305.33
   },
   "drc_errors": 0,
   "drc_by_type": {},
   "unconnected": 1,
   "clean": false,
-  "seconds": 2.6,
+  "seconds": 2.5,
   "kicad": "9.0.7",
   "failures": [
     {
       "net": 1,
       "name": "GND",
-      "reason": "no legal path once the bundle was seated"
+      "reason": "F.Cu: no collision-free taut path between the endpoints"
     }
   ]
 }

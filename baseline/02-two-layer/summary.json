@@ -12,21 +12,12 @@
       "B.Cu"
     ],
     "order": "longest-first",
-    "bundle": true,
     "connections": 20,
     "routed": 20,
     "failed": 0,
-    "tracks": 36,
+    "tracks": 34,
     "arcs": 5,
-    "length_mm": 239.53,
-    "sequential_length_mm": 239.52,
-    "bundle_portals": 18,
-    "bundle_shared": 10,
-    "bundle_oversubscribed": 0,
-    "bundle_reseated": 12,
-    "bundle_fallbacks": 5,
-    "bundle_passes": 2,
-    "bundle_dropped": 0
+    "length_mm": 239.52
   },
   "drc_errors": 0,
   "drc_by_type": {},

@@ -93,6 +93,50 @@ def card(index: int, item: dict) -> str:
     </article>"""
 
 
+def comparison_block() -> str:
+    """The sequential/bundle side-by-side, if it has been run."""
+    path = ROOT / "results" / "comparison.json"
+    if not path.exists():
+        return ""
+    rows = json.loads(path.read_text(encoding="utf-8"))
+
+    body = []
+    for entry in rows:
+        label = f"{entry['board']} [{'+'.join(entry['layers'])}]"
+        seq, bun = entry["sequential"], entry["bundle"]
+        same = (seq["routed"] == bun["routed"] and seq["drc"] == bun["drc"])
+        body.append(
+            f"<tr><td rowspan='2' class='case'>{html.escape(label)}</td>"
+            f"<td class='mode'>sequential</td>"
+            f"<td>{seq['routed']} / {seq['connections']}</td><td>{seq['arcs']}</td>"
+            f"<td>{seq['length_mm']:.1f}</td><td>{seq['drc']}</td>"
+            f"<td>{seq['unconnected']}</td><td>{seq['seconds']:.1f}</td></tr>"
+            f"<tr class='{'same' if same else 'diff'}'><td class='mode'>bundle</td>"
+            f"<td>{bun['routed']} / {bun['connections']}</td><td>{bun['arcs']}</td>"
+            f"<td>{bun['length_mm']:.1f}</td><td>{bun['drc']}</td>"
+            f"<td>{bun['unconnected']}</td><td>{bun['seconds']:.1f}</td></tr>")
+
+    return f"""
+  <section>
+    <h2>Sequential versus bundle</h2>
+    <p>Both schemes, same boards, same process &mdash; the only thing that differs is whether
+      nets are seated in their shared gaps before being routed.</p>
+    <div class="tablewrap">
+      <table class="compare">
+        <thead><tr><th>board</th><th>scheme</th><th>connections</th><th>arcs</th>
+          <th>copper (mm)</th><th>DRC</th><th>unconnected</th><th>time (s)</th></tr></thead>
+        <tbody>{''.join(body)}</tbody>
+      </table>
+    </div>
+    <p class="note"><strong>The bundle changes nothing on these three boards.</strong> That is
+      the honest result, and it is worth stating plainly rather than burying. The mechanism is
+      correct &mdash; it is proven directly on the case it was built for, where a gap holds two
+      tracks, one net alone takes the middle of it, and the second cannot fit until both are
+      seated. None of these boards' remaining failures turn out to be that case.</p>
+  </section>
+"""
+
+
 def main() -> int:
     items = load_examples()
     if not items:
@@ -106,6 +150,7 @@ def main() -> int:
     page = TEMPLATE.replace("{{CARDS}}", cards)
     page = page.replace("{{ENGINE}}", html.escape(str(engine)))
     page = page.replace("{{ARCS}}", str(total_arcs))
+    page = page.replace("{{COMPARISON}}", comparison_block())
     OUT.write_text(page, encoding="utf-8")
     print(f"wrote {OUT} ({len(page) // 1024} KB, {len(items)} examples)")
     return 0
@@ -388,6 +433,34 @@ TEMPLATE = """<title>Taut String Router</title>
     color: var(--ink);
   }
 
+  .tablewrap { overflow-x: auto; margin: 1.4rem 0; }
+
+  table.compare {
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 640px;
+  }
+  table.compare th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.5rem 0.9rem;
+    border-bottom: 1px solid var(--hair);
+  }
+  table.compare td {
+    padding: 0.45rem 0.9rem;
+    border-bottom: 1px solid var(--hair);
+  }
+  table.compare td.case { font-family: var(--sans); color: var(--ink); }
+  table.compare td.mode { color: var(--muted); }
+  table.compare tr.same td.mode::after { content: " ="; color: var(--muted); }
+  table.compare tr.diff td.mode::after { content: " *"; color: var(--copper); }
+
   .legend {
     display: flex;
     gap: 1.5rem;
@@ -472,6 +545,8 @@ TEMPLATE = """<title>Taut String Router</title>
     </div>
     {{CARDS}}
   </section>
+
+  {{COMPARISON}}
 
   <section>
     <h2>Why this shape</h2>

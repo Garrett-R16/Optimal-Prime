@@ -22,14 +22,31 @@ Two runs on the same KiCad demo board, judged entirely by KiCad's own DRC.
 
 | board | layers | connections | arcs | copper | DRC errors | unconnected | time |
 |---|---|---|---|---|---|---|---|
-| `ecc83-pp` | F.Cu | 19 / 20 | 12 | 305.3 mm | **0** | 1 | 2.5 s |
+| `ecc83-pp` | F.Cu | 19 / 20 | 12 | 305.3 mm | **0** | 1 | 2.6 s |
 | `ecc83-pp` | F.Cu + B.Cu | **20 / 20** | 5 | 239.5 mm | **0** | **0** | 1.0 s |
-| `sonde xilinx` | F.Cu + B.Cu | 63 / 66 | 38 | 690.3 mm | **0** | 3 | 52 s |
+| `sonde xilinx` | F.Cu + B.Cu | 63 / 66 | 40 | 697.8 mm | **0** | 3 | 63 s |
 
-Nothing here is DRC-dirty. What varies is how much gets *finished*: one layer is not enough
-for `ecc83-pp`, and the second run is the same board with the back copper allowed. When the
-router cannot find a legal path it reports the connection as unrouted rather than laying
-copper anyway.
+Nothing here is DRC-dirty. What varies is how much gets *finished*. When the router cannot
+find a legal path it reports the connection as unrouted rather than laying copper anyway.
+
+### Sequential versus bundle
+
+Both schemes on the same boards, via `python scripts/compare.py`:
+
+| board | scheme | connections | copper | DRC | unconnected |
+|---|---|---|---|---|---|
+| `ecc83-pp` F.Cu | sequential | 19 / 20 | 305.3 mm | 0 | 1 |
+| | **bundle** | 19 / 20 | 305.3 mm | 0 | 1 |
+| `ecc83-pp` F.Cu+B.Cu | sequential | 20 / 20 | 239.5 mm | 0 | 0 |
+| | **bundle** | 20 / 20 | 239.5 mm | 0 | 0 |
+| `sonde xilinx` | sequential | 63 / 66 | 690.3 mm | 0 | 3 |
+| | **bundle** | 63 / 66 | 697.8 mm | 0 | 3 |
+
+**The bundle changes nothing on these boards**, and that is worth stating plainly. The
+mechanism is correct — `tests/test_bundle.py` proves it directly on the case it exists for:
+a gap that holds two tracks, one net alone sitting in the middle of it, and the second unable
+to fit until both are seated. None of these boards' remaining failures turn out to be that
+case.
 
 Rendered results with the geometry visible: [`examples/results.html`](examples/results.html).
 
@@ -67,8 +84,13 @@ The whole route lands as a single undo step.
 
 - **No vias.** A connection goes on whichever allowed layer is shorter, but never changes
   layer part-way. Two surface pads on opposite faces have no solution.
-- **Nets are routed one after another**, each finished track becoming an obstacle for the
-  next. Nothing negotiates, reroutes, or reconsiders an order.
+- **Contention is only modelled inside gaps between two static obstacles.** Two nets running
+  alongside each other in open copper share no gap, so no slot assignment covers them and the
+  settling pass falls back to routing one against the other. That is why the bundle does not
+  yet move these boards.
+- **What blocks the remaining connections is unresolved.** They fail during settling, not for
+  want of a path in isolation, so they are contention failures — but whether a different
+  global arrangement would fit them, or whether they genuinely need a via, is not yet known.
 
 None of these can produce an illegal board — they cost completed connections, never
 correctness. When no legal path exists the router says so instead of laying copper anyway.

@@ -1,0 +1,76 @@
+[
+  {
+    "board": "ecc83-pp",
+    "layers": [
+      "F.Cu"
+    ],
+    "sequential": {
+      "routed": 19,
+      "connections": 20,
+      "arcs": 12,
+      "length_mm": 305.33,
+      "seconds": 2.5,
+      "drc": 0,
+      "unconnected": 1
+    },
+    "bundle": {
+      "routed": 19,
+      "connections": 20,
+      "arcs": 12,
+      "length_mm": 305.34,
+      "seconds": 2.6,
+      "drc": 0,
+      "unconnected": 1
+    }
+  },
+  {
+    "board": "ecc83-pp",
+    "layers": [
+      "F.Cu",
+      "B.Cu"
+    ],
+    "sequential": {
+      "routed": 20,
+      "connections": 20,
+      "arcs": 5,
+      "length_mm": 239.52,
+      "seconds": 0.9,
+      "drc": 0,
+      "unconnected": 0
+    },
+    "bundle": {
+      "routed": 20,
+      "connections": 20,
+      "arcs": 5,
+      "length_mm": 239.53,
+      "seconds": 1.0,
+      "drc": 0,
+      "unconnected": 0
+    }
+  },
+  {
+    "board": "sonde xilinx",
+    "layers": [
+      "F.Cu",
+      "B.Cu"
+    ],
+    "sequential": {
+      "routed": 63,
+      "connections": 66,
+      "arcs": 39,
+      "length_mm": 690.3,
+      "seconds": 50.7,
+      "drc": 0,
+      "unconnected": 3
+    },
+    "bundle": {
+      "routed": 63,
+      "connections": 66,
+      "arcs": 40,
+      "length_mm": 697.82,
+      "seconds": 63.1,
+      "drc": 0,
+      "unconnected": 3
+    }
+  }
+]

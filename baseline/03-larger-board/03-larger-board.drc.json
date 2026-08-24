@@ -1,0 +1,456 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-08-24T07:43:49-0400",
+    "kicad_version": "9.0.7",
+    "schematic_parity": [],
+    "source": "03-larger-board.kicad_pcb",
+    "unconnected_items": [
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 3 [/CLK-D1] of J1 on top_copper",
+                    "pos": {
+                        "x": 105.5116,
+                        "y": 78.0232
+                    },
+                    "uuid": "1f175e1c-1773-4fbe-861f-248be328a2e5"
+                },
+                {
+                    "description": "PTH pad 2 [/CLK-D1] of R10",
+                    "pos": {
+                        "x": 111.76,
+                        "y": 77.216
+                    },
+                    "uuid": "79c3e59c-5074-45ca-8ca6-bb089b0c1f57"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 6 [/TD0-PROG-D4] of J1 on top_copper",
+                    "pos": {
+                        "x": 105.5116,
+                        "y": 86.3332
+                    },
+                    "uuid": "ac6477f2-ce8d-4c64-a22d-48cf72e3229e"
+                },
+                {
+                    "description": "PTH pad 2 [/TD0-PROG-D4] of R6",
+                    "pos": {
+                        "x": 111.7727,
+                        "y": 83.82
+                    },
+                    "uuid": "a2943ec0-19e8-47a6-a579-0e1c46243f05"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        },
+        {
+            "description": "Missing connection between items",
+            "items": [
+                {
+                    "description": "Pad 4 [/TMS-PROG-D2] of J1 on top_copper",
+                    "pos": {
+                        "x": 105.5116,
+                        "y": 80.7932
+                    },
+                    "uuid": "d85bd893-df4f-4810-8c87-827b3177da9d"
+                },
+                {
+                    "description": "PTH pad 2 [/TMS-PROG-D2] of R9",
+                    "pos": {
+                        "x": 111.76,
+                        "y": 80.518
+                    },
+                    "uuid": "d2695ed2-e944-42d8-a12a-36c5066b6545"
+                }
+            ],
+            "severity": "error",
+            "type": "unconnected_items"
+        }
+    ],
+    "violations": [
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R14",
+                    "pos": {
+                        "x": 162.56,
+                        "y": 88.9
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56ced6"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R9",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 80.518
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56ceec"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R4",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 104.14
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf02"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R13",
+                    "pos": {
+                        "x": 162.56,
+                        "y": 105.41
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf18"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R12",
+                    "pos": {
+                        "x": 162.56,
+                        "y": 99.06
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf2e"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R11",
+                    "pos": {
+                        "x": 162.56,
+                        "y": 93.98
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf44"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R8",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 87.63
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf5a"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R7",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 92.71
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf70"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R6",
+                    "pos": {
+                        "x": 121.9327,
+                        "y": 83.82
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf86"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R2",
+                    "pos": {
+                        "x": 137.16,
+                        "y": 72.39
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cf9c"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R5",
+                    "pos": {
+                        "x": 151.13,
+                        "y": 73.66
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cfc8"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R10",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 77.216
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56cfde"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint D2",
+                    "pos": {
+                        "x": 160.02,
+                        "y": 78.74
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56d036"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint D1",
+                    "pos": {
+                        "x": 134.62,
+                        "y": 72.39
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56d054"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint R1",
+                    "pos": {
+                        "x": 121.92,
+                        "y": 73.8632
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a56d255"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint C1",
+                    "pos": {
+                        "x": 134.62,
+                        "y": 76.2
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a5834a9"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint P1",
+                    "pos": {
+                        "x": 169.672,
+                        "y": 80.137
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a583d55"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint U2",
+                    "pos": {
+                        "x": 140.97,
+                        "y": 82.55
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a58f58c"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint U1",
+                    "pos": {
+                        "x": 127.0,
+                        "y": 82.55
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a58f5ad"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint C5",
+                    "pos": {
+                        "x": 145.0,
+                        "y": 102.87
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a59b977"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint C4",
+                    "pos": {
+                        "x": 149.0,
+                        "y": 102.87
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a59b98b"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint C3",
+                    "pos": {
+                        "x": 151.13,
+                        "y": 69.85
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a59b99f"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint C2",
+                    "pos": {
+                        "x": 140.97,
+                        "y": 102.87
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a59b9b3"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint J1",
+                    "pos": {
+                        "x": 105.5116,
+                        "y": 89.1032
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a73ac29"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        },
+        {
+            "description": "The current configuration does not include the footprint library 'sonde-xilinx'.",
+            "items": [
+                {
+                    "description": "Footprint J2",
+                    "pos": {
+                        "x": 181.61,
+                        "y": 90.1192
+                    },
+                    "uuid": "00000000-0000-0000-0000-00005a73b143"
+                }
+            ],
+            "severity": "warning",
+            "type": "lib_footprint_issues"
+        }
+    ]
+}

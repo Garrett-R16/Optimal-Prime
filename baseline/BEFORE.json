@@ -1,0 +1,52 @@
+{
+  "label": "sequential (per-net taut)",
+  "runs": [
+    {
+      "tag": "",
+      "board": "ecc83-pp",
+      "layers": [
+        "F.Cu"
+      ],
+      "routed": 19,
+      "connections": 20,
+      "arcs": 12,
+      "length_mm": 305.33,
+      "drc": 0,
+      "unconnected": 1,
+      "clean": false,
+      "seconds": 2.5
+    },
+    {
+      "tag": "",
+      "board": "ecc83-pp",
+      "layers": [
+        "F.Cu",
+        "B.Cu"
+      ],
+      "routed": 20,
+      "connections": 20,
+      "arcs": 5,
+      "length_mm": 239.52,
+      "drc": 0,
+      "unconnected": 0,
+      "clean": true,
+      "seconds": 1.0
+    },
+    {
+      "tag": "",
+      "board": "sonde xilinx",
+      "layers": [
+        "F.Cu",
+        "B.Cu"
+      ],
+      "routed": 63,
+      "connections": 66,
+      "arcs": 38,
+      "length_mm": 690.3,
+      "drc": 0,
+      "unconnected": 3,
+      "clean": false,
+      "seconds": 51.8
+    }
+  ]
+}
