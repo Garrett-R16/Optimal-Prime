@@ -1,0 +1,29 @@
+{
+  "board": "ecc83-pp",
+  "layers": [
+    "F.Cu",
+    "B.Cu"
+  ],
+  "order": "longest-first",
+  "stats": {
+    "board": "ecc83-pp",
+    "layers": [
+      "F.Cu",
+      "B.Cu"
+    ],
+    "order": "longest-first",
+    "connections": 20,
+    "routed": 20,
+    "failed": 0,
+    "tracks": 30,
+    "arcs": 5,
+    "length_mm": 240.23
+  },
+  "drc_errors": 0,
+  "drc_by_type": {},
+  "unconnected": 0,
+  "clean": true,
+  "seconds": 5.0,
+  "kicad": "9.0.7",
+  "failures": []
+}

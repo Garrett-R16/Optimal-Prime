@@ -1,0 +1,19 @@
+{
+  "identifier": "com.optimalprime.taut",
+  "name": "Taut-String Router",
+  "description": "Routes nets as taut rubber bands: straight lines and arcs, no grid, no 45-degree rule.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.11"
+  },
+  "actions": [
+    {
+      "identifier": "route-taut",
+      "name": "Route with taut strings",
+      "description": "Route every unrouted net as the shortest path a rubber band would take.",
+      "entrypoint": "route_taut.py",
+      "show-button": true,
+      "scopes": ["pcb"]
+    }
+  ]
+}
