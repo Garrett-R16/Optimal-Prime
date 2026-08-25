@@ -55,6 +55,9 @@ _KEEP_WITHOUT_ASKING = 1.25
 #: How many times to re-read the crossing order off the geometry and embed again.
 _SEATING_PASSES = 4
 
+#: How many settled tracks rip-up will move to make room for one that has nowhere to go.
+_RIPUP_LIMIT = 4
+
 
 # --------------------------------------------------------------------------- outline
 
@@ -120,6 +123,16 @@ class _Link:
     layer: str | None = None
     elements: list = field(default_factory=list)
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _Placed:
+    """A connection already on the board, and the room it takes up."""
+
+    key: int
+    net: int
+    path: TautPath
+    halo: float
 
 
 def _mst_edges(pads):
@@ -593,7 +606,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             link.elements = elements.get(route.key, [])
 
     # ---- check the geometry, and repair what does not hold --------------------------
-    checked = {"taut": 0, "fell_back": 0, "dropped": 0}
+    checked = {"taut": 0, "fell_back": 0, "dropped": 0, "rescued": 0}
     boundary = _board_boundary(board)
 
     static_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
@@ -608,73 +621,146 @@ def plan_board(board: Board, layers: list[str] | None = None,
             static_cache[key] = cached
         return cached
 
-    settled: dict[str, list[tuple[int, TautPath, float]]] = {layer: [] for layer in usable}
+    settled: dict[str, list[_Placed]] = {layer: [] for layer in usable}
+    by_key = {link.key: link for link in links}
+    #: how each connection currently on the board got there; counted up at the end, so that
+    #: taking a track up and putting it back somewhere else is not tallied twice
+    how: dict[int, str] = {}
 
+    def candidates(link: _Link) -> list[str]:
+        return [layer for layer in usable
+                if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]
+
+    def in_the_way(layer: str, link: _Link, ignore: frozenset[int]) -> list[Obstacle]:
+        half = link.width / 2.0 + GUARDBAND_NM
+        out = [o for o in statics(layer, link.clearance, half) if o.net != link.net.code]
+        for placed in settled[layer]:
+            if placed.key in ignore or placed.net == link.net.code:
+                continue
+            out.extend(_path_obstacles(placed.path, link.halo, placed.net))
+        return out
+
+    def attempt(link: _Link, ignore: frozenset[int]) -> tuple[TautPath, str, str] | None:
+        """The best legal geometry for one connection, given what is already down."""
+        edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
+        ends = ((float(link.pad_a.x), float(link.pad_a.y)),
+                (float(link.pad_b.x), float(link.pad_b.y)))
+        best: tuple[TautPath, str, str] | None = None
+
+        if link.elements and link.layer:
+            taut = _as_path(link.elements)
+            if (not violated_obstacles(taut, in_the_way(link.layer, link, ignore))
+                    and _clears_boundary(taut, boundary, edge_gap)):
+                # Legal is not the same as good. A taut path that wanders well past its own
+                # span is worth measuring against the exact solver, which answers a different
+                # question -- shortest ignoring topology -- and sometimes wins outright.
+                if taut.length <= link.span * _KEEP_WITHOUT_ASKING:
+                    return taut, link.layer, "taut"
+                best = (taut, link.layer, "taut")
+
+        for layer in candidates(link):
+            try:
+                found = _solve_lazily(*ends, in_the_way(layer, link, ignore),
+                                      boundary=boundary, boundary_gap=edge_gap)
+            except NoPathFound:
+                continue
+            if best is None or found.length < best[0].length:
+                best = (found, layer, "fell_back")
+
+        return best
+
+    def lay(link: _Link, outcome: tuple[TautPath, str, str]) -> None:
+        path, layer, kind = outcome
+        link.layer = layer
+        link.elements = list(path.elements)
+        link.reason = ""
+        settled[layer].append(_Placed(key=link.key, net=link.net.code,
+                                      path=path, halo=link.halo))
+        how[link.key] = kind
+
+    def take_up(link: _Link) -> None:
+        for layer in usable:
+            settled[layer] = [p for p in settled[layer] if p.key != link.key]
+        link.elements = []
+        how.pop(link.key, None)
+
+    stranded: list[_Link] = []
+    rescued_links: list[_Link] = []
     for link in sorted(links, key=lambda l: -l.span):
         if link.layer is None:
             continue
-        half = link.width / 2.0 + GUARDBAND_NM
-        blockers = [o for o in statics(link.layer, link.clearance, half)
-                    if o.net != link.net.code]
-        for net_code, path, halo in settled[link.layer]:
-            if net_code != link.net.code:
-                blockers.extend(_path_obstacles(path, link.halo, net_code))
+        outcome = attempt(link, frozenset())
+        if outcome is None:
+            stranded.append(link)
+            continue
+        lay(link, outcome)
 
-        edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
-        path = _as_path(link.elements) if link.elements else None
-        legal = (path is not None and not violated_obstacles(path, blockers)
-                 and _clears_boundary(path, boundary, edge_gap))
-
-        # Legal is not the same as good. The funnel can return a path that clears everything
-        # while wandering at nearly twice its own span, and keeping it because it is legal
-        # both wastes copper and takes space the connections after it need -- a *better*
-        # channel made the board worse that way, by producing a merely-adequate path where
-        # the previous one had been rejected outright. So a wandering path is measured
-        # against what the exact solver would do, and the shorter one wins.
-        if legal and path.length <= link.span * _KEEP_WITHOUT_ASKING:
-            checked["taut"] += 1
-            settled[link.layer].append((link.net.code, path, link.halo))
+    # ---- rip up what is in the way of a connection with nowhere to go ----------------
+    #
+    # Topology allocated a corridor for every connection, so a connection with no legal
+    # geometry is not evidence that the board is full -- it is evidence that a track laid
+    # earlier took more room than its own corridor. Ask where this one would go on an empty
+    # board, take up only the tracks actually sitting on that answer, place it, and put them
+    # back somewhere else.
+    for link in list(stranded):
+        everything = frozenset(placed.key for layer in usable for placed in settled[layer])
+        alone = attempt(link, everything)
+        if alone is None:
+            link.reason = "no geometry between these pads even on an empty board"
             continue
 
-        # Either the construction did not hold, or it held but wandered. Ask the exact
-        # solver, which chooses its own class -- worse topology, but geometry that is
-        # certainly legal and, when the funnel wandered, usually much shorter.
-        # The fallback may also change layer. Pinning it to whichever face topology chose
-        # strands a connection on a crowded one when the other is empty.
-        alternative = None
-        alt_layer = link.layer
-        for candidate in [layer for layer in usable
-                          if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]:
-            here = [o for o in statics(candidate, link.clearance, half)
-                    if o.net != link.net.code]
-            for net_code, other, _halo in settled[candidate]:
-                if net_code != link.net.code:
-                    here.extend(_path_obstacles(other, link.halo, net_code))
-            try:
-                found = _solve_lazily(
-                    (float(link.pad_a.x), float(link.pad_a.y)),
-                    (float(link.pad_b.x), float(link.pad_b.y)), here,
-                    boundary=boundary, boundary_gap=edge_gap)
-            except NoPathFound:
-                continue
-            if alternative is None or found.length < alternative.length:
-                alternative, alt_layer = found, candidate
-
-        if alternative is None and not legal:
-            link.elements = []
-            link.reason = "funnel geometry rejected and no fallback path on any layer"
-            checked["dropped"] += 1
+        path, layer, _kind = alone
+        culprits = [placed for placed in settled[layer]
+                    if placed.net != link.net.code
+                    and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
+                                                                 placed.net))]
+        if not culprits or len(culprits) > _RIPUP_LIMIT:
+            link.reason = (f"blocked by {len(culprits)} settled tracks, more than rip-up "
+                           f"will move" if culprits else "blocked by static copper")
             continue
 
-        if legal and (alternative is None or path.length <= alternative.length):
-            checked["taut"] += 1
-            settled[link.layer].append((link.net.code, path, link.halo))
+        keys = frozenset(placed.key for placed in culprits)
+        outcome = attempt(link, keys)
+        if outcome is None:
+            link.reason = "no legal geometry even with the tracks in the way taken up"
             continue
 
-        checked["fell_back"] += 1
-        link.layer = alt_layer
-        link.elements = list(alternative.elements)
-        settled[link.layer].append((link.net.code, alternative, link.halo))
+        snapshot = {name: list(rows) for name, rows in settled.items()}
+        displaced = [by_key[placed.key] for placed in culprits if placed.key in by_key]
+        for other in displaced:
+            take_up(other)
+        lay(link, outcome)
+
+        replaced = []
+        for other in displaced:
+            again = attempt(other, frozenset())
+            if again is None:
+                break
+            lay(other, again)
+            replaced.append(other)
+        else:
+            stranded.remove(link)
+            rescued_links.append(link)
+            continue
+
+        # One of the displaced tracks could not be put back. Undo the whole exchange rather
+        # than trade one unrouted connection for another.
+        for name, rows in snapshot.items():
+            settled[name] = rows
+        for other in displaced:
+            for name, rows in snapshot.items():
+                for placed in rows:
+                    if placed.key == other.key:
+                        other.layer = name
+                        other.elements = list(placed.path.elements)
+                        how[other.key] = "fell_back"
+        link.elements = []
+        link.reason = "rip-up would have stranded a track that was already placed"
+
+    checked["taut"] = sum(1 for kind in how.values() if kind == "taut")
+    checked["fell_back"] = sum(1 for kind in how.values() if kind == "fell_back")
+    checked["rescued"] = len(rescued_links)
+    checked["dropped"] = sum(1 for link in stranded if not link.elements)
 
     for link in links:
         if not link.elements:
