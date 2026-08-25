@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from .board import Board, Net, Pad
 from .funnel import Curve, Gate, Line, funnel, orient, taut_through
 from .rubberband import Arc as RbArc, Crossing, Segment as RbSegment
-from .rubberband import Wire as RbWire, rubberband, to_geometry
+from .rubberband import Wire as RbWire, _segments_cross, rubberband, to_geometry
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
 from .route import (ArcTrack, RouteResult, Track, _board_boundary, _convex_hull,
@@ -53,7 +53,7 @@ __all__ = ["plan_board"]
 _KEEP_WITHOUT_ASKING = 1.25
 
 #: How many times to re-read the crossing order off the geometry and embed again.
-_SEATING_PASSES = 4
+_SEATING_PASSES = 8
 
 #: How many settled tracks rip-up will move to make room for one that has nowhere to go.
 _RIPUP_LIMIT = 4
@@ -136,6 +136,10 @@ class _Placed:
     net: int
     path: TautPath
     halo: float
+    #: this connection's own half width and clearance, so the wire meeting it can work out
+    #: the gap the two of them need between their centre lines
+    half: float
+    clearance: float
 
 
 def _mst_edges(pads):
@@ -311,6 +315,156 @@ def _crossing_order(mesh: Mesh, routes) -> dict[tuple[int, int], list[int]]:
             for key, value in seats.items()}
 
 
+def _side_by_side(routes) -> list[tuple[int, int, list[tuple[int, int]]]]:
+    """For every pair of wires, the stretches of doorway they cross side by side.
+
+    A stretch is a set of doorways consecutive in *both* routes. There is nothing between two
+    consecutive doorways for a wire to go around, so within a stretch the two wires cannot
+    swap sides without crossing -- and two wires on one layer never cross. Their order over a
+    stretch is therefore a single fact, not one fact per doorway.
+
+    Where they part and meet again the order is free to differ, because in between they may
+    have passed opposite sides of the same pad; that is why this is per stretch rather than
+    global.
+    """
+    live = {route.key: route for route in routes if route.found}
+    seats = {key: {portal: index for index, portal in enumerate(route.portals)}
+             for key, route in live.items()}
+
+    out: list[tuple[int, int, list[tuple[int, int]]]] = []
+    keys = sorted(live)
+    for position, first in enumerate(keys):
+        for second in keys[position + 1:]:
+            here, there = seats[first], seats[second]
+            run: list[tuple[int, int]] = []
+            for portal in live[first].portals:
+                if portal not in there:
+                    continue
+                if run and not (abs(here[portal] - here[run[-1]]) == 1
+                                and abs(there[portal] - there[run[-1]]) == 1):
+                    out.append((first, second, run))
+                    run = []
+                run.append(portal)
+            if run:
+                out.append((first, second, run))
+    return out
+
+
+def _consistent(routes, raw: dict[tuple[int, int], list[int]]) -> dict[tuple[int, int], list[int]]:
+    """Force each pair of wires into one order for the whole stretch they run together.
+
+    Read doorway by doorway off real geometry, the order comes back inconsistent: a wire ranks
+    outermost at one doorway and third at the next few microns further on. An offset stack
+    computed from that puts it on the far side of a gap it was meant to hug, and two wires
+    whose order disagrees between consecutive doorways have to cross each other in the triangle
+    between them.
+
+    Each stretch takes the majority verdict of its doorways, and each doorway is then rebuilt
+    by counting how many of the wires present are known to come before each one. Counting
+    rather than sorting on the comparison directly, because separate stretches can disagree and
+    leave no total order to sort by; a count still produces a sensible one.
+    """
+    verdicts: dict[tuple[int, int, tuple[int, int]], bool] = {}
+    for first, second, run in _side_by_side(routes):
+        ahead = 0
+        for portal in run:
+            order = raw.get(portal)
+            if order and first in order and second in order:
+                ahead += 1 if order.index(first) < order.index(second) else -1
+        for portal in run:
+            verdicts[(first, second, portal)] = ahead >= 0
+
+    out: dict[tuple[int, int], list[int]] = {}
+    for portal, order in raw.items():
+        rank = {wire: order.index(wire) for wire in order}
+        behind = {}
+        for wire in order:
+            count = 0
+            for other in order:
+                if other == wire:
+                    continue
+                pair = (wire, other) if wire < other else (other, wire)
+                verdict = verdicts.get((pair[0], pair[1], portal))
+                leader = (pair[0] if verdict else pair[1]) if verdict is not None else (
+                    wire if rank[wire] < rank[other] else other)
+                if leader != wire:
+                    count += 1
+            behind[wire] = count
+        out[portal] = sorted(order, key=lambda wire: (behind[wire], rank[wire]))
+    return out
+
+
+def _bounds(points) -> tuple[float, float, float, float]:
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _apart(one, two, slack: float = 0.0) -> bool:
+    return (one[2] + slack < two[0] or two[2] + slack < one[0]
+            or one[3] + slack < two[1] or two[3] + slack < one[1])
+
+
+def _polylines_cross(first, second) -> bool:
+    if _apart(_bounds(first), _bounds(second)):
+        return False
+    for pa, pb in zip(first, first[1:]):
+        box = (min(pa[0], pb[0]), min(pa[1], pb[1]), max(pa[0], pb[0]), max(pa[1], pb[1]))
+        for qa, qb in zip(second, second[1:]):
+            other = (min(qa[0], qb[0]), min(qa[1], qb[1]),
+                     max(qa[0], qb[0]), max(qa[1], qb[1]))
+            if _apart(box, other):
+                continue
+            if _segments_cross(pa[0], pa[1], pb[0], pb[1], qa[0], qa[1], qb[0], qb[1]):
+                return True
+    return False
+
+
+def _crossing_pairs(routes, elements) -> set[tuple[int, int]]:
+    """Wires whose embedded paths actually cross each other.
+
+    Topology hands out corridors one connection at a time, and nothing in that makes the
+    result planar: two routes that share a single doorway can still be embedded crossing,
+    because which side of each other they pass on is decided by where they came from and
+    where they are going, not by the doorway. Two wires on one layer crossing is a short --
+    it is the whole of what is left to fix, and the check for it is worth its cost.
+    """
+    lines = {route.key: _flatten(route.start, route.goal, elements[route.key])
+             for route in routes if route.found and route.key in elements}
+    net_of = {route.key: route.net for route in routes}
+
+    out: set[tuple[int, int]] = set()
+    keys = sorted(lines)
+    for position, first in enumerate(keys):
+        for second in keys[position + 1:]:
+            if net_of[first] == net_of[second]:
+                continue
+            if _polylines_cross(lines[first], lines[second]):
+                out.add((first, second))
+    return out
+
+
+def _uncross(routes, order, pairs) -> dict[tuple[int, int], list[int]]:
+    """Swap crossing wires over, wherever they share a doorway.
+
+    Two wires cross because of the order they were given, so the order is where to fix it:
+    exchange them at every doorway they share and pull both taut again. What was a crossing
+    becomes two wires running side by side, and the pair that was hardest to place stops being
+    a special case.
+    """
+    shares = {route.key: set(route.portals) for route in routes if route.found}
+    swapped = {portal: list(seats) for portal, seats in order.items()}
+
+    for first, second in pairs:
+        for portal in shares.get(first, set()) & shares.get(second, set()):
+            seats = swapped.get(portal)
+            if not seats or first not in seats or second not in seats:
+                continue
+            here, there = seats.index(first), seats.index(second)
+            seats[here], seats[there] = seats[there], seats[here]
+    return swapped
+
+
 def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire]) -> list[Crossing]:
     """The doorways on one route, each carrying the full crossing order and this wire's rank."""
     out: list[Crossing] = []
@@ -442,7 +596,9 @@ def _as_path(elements) -> TautPath:
     """Funnel output in the form the geometric checker and emitter already understand."""
     out = []
     for element in elements:
-        if isinstance(element, Line):
+        if isinstance(element, (PathLine, PathArc)):
+            out.append(element)
+        elif isinstance(element, Line):
             out.append(PathLine(element.x1, element.y1, element.x2, element.y2))
         else:
             out.append(PathArc(element.cx, element.cy, element.r,
@@ -539,8 +695,20 @@ def plan_board(board: Board, layers: list[str] | None = None,
         points.append(route.goal)
         return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
 
+    def would_cross(link: _Link, other: _Link) -> bool:
+        return (link.net.code != other.net.code
+                and _segments_cross(float(link.pad_a.x), float(link.pad_a.y),
+                                    float(link.pad_b.x), float(link.pad_b.y),
+                                    float(other.pad_a.x), float(other.pad_a.y),
+                                    float(other.pad_b.x), float(other.pad_b.y)))
+
+    # Two wires on one layer must not cross, and most of them are straight: with the corridor
+    # right, a taut wire wraps nothing at all unless something is in its way. So the straight
+    # line between two pads predicts almost exactly which pairs will fight, and it costs a
+    # cross product to ask. Crossings decide the layer; the topological probe -- much the more
+    # expensive question -- is only asked to break a tie.
     by_layer: dict[str, list[_Link]] = {layer: [] for layer in usable}
-    for link in links:
+    for link in sorted(links, key=lambda l: -l.span):
         options = [layer for layer in usable
                    if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]
         if not options:
@@ -552,19 +720,27 @@ def plan_board(board: Board, layers: list[str] | None = None,
             by_layer[link.layer].append(link)
             continue
 
-        # Probe each candidate on an empty board -- what the route costs before anyone else
-        # is on it. Contention is settled afterwards, by the negotiation.
-        best_layer, best_cost = options[0], math.inf
-        request = [(link.key, link.net.code,
-                    (float(link.pad_a.x), float(link.pad_a.y)),
-                    (float(link.pad_b.x), float(link.pad_b.y)))]
-        for layer in options:
-            probe, _ = route_topology(meshes[layer], request, rounds=1)
-            cost = portal_chain_length(meshes[layer], probe[0])
-            if cost < best_cost:
-                best_layer, best_cost = layer, cost
-        link.layer = best_layer
-        by_layer[best_layer].append(link)
+        clashes = {layer: sum(1 for other in by_layer[layer] if would_cross(link, other))
+                   for layer in options}
+        fewest = min(clashes.values())
+        shortlist = [layer for layer in options if clashes[layer] == fewest]
+
+        if len(shortlist) == 1:
+            link.layer = shortlist[0]
+        else:
+            # Nothing to choose between them on crossings, so ask what the route would cost on
+            # an empty board. Contention is settled afterwards, by the negotiation.
+            request = [(link.key, link.net.code,
+                        (float(link.pad_a.x), float(link.pad_a.y)),
+                        (float(link.pad_b.x), float(link.pad_b.y)))]
+            best_layer, best_cost = shortlist[0], math.inf
+            for layer in shortlist:
+                probe, _ = route_topology(meshes[layer], request, rounds=1)
+                cost = portal_chain_length(meshes[layer], probe[0])
+                if cost < best_cost:
+                    best_layer, best_cost = layer, cost
+            link.layer = best_layer
+        by_layer[link.layer].append(link)
 
     topo_stats = {"rounds": 0, "overfull": 0, "unroutable": 0, "converged": True}
 
@@ -581,7 +757,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         topo_stats["unroutable"] += report.unroutable
         topo_stats["converged"] = topo_stats["converged"] and report.converged
 
-        order = _crossing_order(mesh, routes)
+        order = _consistent(routes, _crossing_order(mesh, routes))
         wires = {link.key: RbWire(key=link.key, net=link.net.code,
                                   half_width=link.width / 2.0,
                                   clearance=link.clearance + GUARDBAND_NM)
@@ -596,7 +772,15 @@ def plan_board(board: Board, layers: list[str] | None = None,
                             route.start, route.goal,
                             _crossings_for(mesh, route, order, wires))
                         for route in routes if route.found}
-            settled_order = _order_from_geometry(mesh, routes, elements)
+
+            # Crossings first: a wire on the wrong side of another is a short, and no amount
+            # of re-reading the order off geometry that already crosses will undo it.
+            tangled = _crossing_pairs(routes, elements)
+            if tangled:
+                order = _uncross(routes, order, tangled)
+                continue
+
+            settled_order = _consistent(routes, _order_from_geometry(mesh, routes, elements))
             if settled_order == order:
                 break
             order = settled_order
@@ -634,13 +818,23 @@ def plan_board(board: Board, layers: list[str] | None = None,
         return [layer for layer in usable
                 if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]
 
+    def between(link: _Link, placed: _Placed) -> float:
+        """Centre line to centre line, for a wire and a track already down.
+
+        Both half widths, not just the wire's own. Charging only its own let two tracks sit
+        their two half widths closer than the rules allow -- 0.12 mm on a 0.25 mm track, which
+        is most of a clearance -- and the check passed geometry that DRC did not.
+        """
+        return (max(link.clearance, placed.clearance) + link.width / 2.0 + placed.half
+                + GUARDBAND_NM)
+
     def in_the_way(layer: str, link: _Link, ignore: frozenset[int]) -> list[Obstacle]:
         half = link.width / 2.0 + GUARDBAND_NM
         out = [o for o in statics(layer, link.clearance, half) if o.net != link.net.code]
         for placed in settled[layer]:
             if placed.key in ignore or placed.net == link.net.code:
                 continue
-            out.extend(_path_obstacles(placed.path, link.halo, placed.net))
+            out.extend(_path_obstacles(placed.path, between(link, placed), placed.net))
         return out
 
     def attempt(link: _Link, ignore: frozenset[int]) -> tuple[TautPath, str, str] | None:
@@ -677,8 +871,9 @@ def plan_board(board: Board, layers: list[str] | None = None,
         link.layer = layer
         link.elements = list(path.elements)
         link.reason = ""
-        settled[layer].append(_Placed(key=link.key, net=link.net.code,
-                                      path=path, halo=link.halo))
+        settled[layer].append(_Placed(key=link.key, net=link.net.code, path=path,
+                                      halo=link.halo, half=link.width / 2.0,
+                                      clearance=link.clearance))
         how[link.key] = kind
 
     def take_up(link: _Link) -> None:
@@ -730,11 +925,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
         path, layer, _kind = alone
         culprits = [placed for placed in settled[layer]
                     if placed.net != link.net.code and placed.key not in protected
-                    and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
+                    and violated_obstacles(path, _path_obstacles(placed.path,
+                                                                 between(link, placed),
                                                                  placed.net))]
         blocked = [placed for placed in settled[layer]
                    if placed.key in protected and placed.net != link.net.code
-                   and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
+                   and violated_obstacles(path, _path_obstacles(placed.path,
+                                                                between(link, placed),
                                                                 placed.net))]
         if blocked or not culprits or len(culprits) > _RIPUP_LIMIT:
             link.reason = ("blocked by a track this exchange is not allowed to move" if blocked
@@ -779,6 +976,30 @@ def plan_board(board: Board, layers: list[str] | None = None,
         if place(link, frozenset(), 0):
             stranded.remove(link)
             rescued_links.append(link)
+
+    # A connection that could not be placed keeps the geometry the embedding gave it, and the
+    # emitter below writes whatever a link is holding. Nothing had cleared it, so a connection
+    # reported as dropped was still being drawn -- unchecked, on top of whatever was there.
+    for link in stranded:
+        link.elements = []
+
+    # Everything above checks a connection against what was already down when it was placed.
+    # That is not the same as checking the board, and the difference is where a rip-up
+    # exchange can leave two tracks overlapping with nobody having compared them. Ask once
+    # more, at the end, about exactly what is going to be drawn.
+    drawn = [link for link in links if link.elements and link.layer]
+    overlaps = 0
+    for position, link in enumerate(drawn):
+        mine = _as_path(link.elements)
+        for other in drawn[position + 1:]:
+            if other.net.code == link.net.code or other.layer != link.layer:
+                continue
+            gap = (max(link.clearance, other.clearance) + link.width / 2.0
+                   + other.width / 2.0 + GUARDBAND_NM)
+            if violated_obstacles(mine, _path_obstacles(_as_path(other.elements),
+                                                        gap, other.net.code)):
+                overlaps += 1
+    checked["overlaps"] = overlaps
 
     checked["taut"] = sum(1 for kind in how.values() if kind == "taut")
     checked["fell_back"] = sum(1 for kind in how.values() if kind == "fell_back")
