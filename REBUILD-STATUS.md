@@ -91,12 +91,24 @@ That took `sonde xilinx` from 63/66 to 65/66.
 rip-up. Until the branch matches 66/66 it should not be merged, however much better the rest of
 the numbers are.
 
-**25 of 66 taut paths on `sonde xilinx` still collide with something** and fall back to the
-exact solver. Since ranks are enforced at the doorways and taut wires cannot cross between
-them, this points at the crossing order rather than the geometry: it is seeded from straight
-chords and then re-read off the embedded result a few times, which settles but is not
-guaranteed to. Making the order consistent by construction is the next real piece of work, and
-it is the same lever that would let the fallback — and most of the remaining 129 s — go away.
+**25 of 66 taut paths on `sonde xilinx` clip copper** and fall back to the exact solver. Every
+one of the 69 violations is against **static copper — not one is against another track**, which
+says the rank-and-spacing machinery is doing its job and locates the remaining defect exactly:
+
+> The embedding keeps a wire clear of the *corners* of a doorway, and nothing keeps it clear of
+> the copper *edge* running between two corners.
+
+A wire crossing near the middle of a rectangular pad's edge satisfies its clearance from both
+that pad's corners and still cuts the flat side between them. Round pads are safe by accident,
+because their facets circumscribe the true circle; rectangular ones are not.
+
+This is the case `toporouter` calls a *constraint edge* — a triangulation edge that is itself
+copper — where the offset becomes a flat `min(spacing, edge length / 2)` about the whole edge
+rather than a stack about a corner. `Crossing.constraint` exists for it and is never set,
+because the mesh does not yet mark which doorways lie along copper. Setting it, and charging
+the walls of each triangle the path crosses as candidates alongside the doorways, is the next
+piece of work — and it is the same lever that would let the fallback, the last unrouted
+connection, and most of the remaining 129 s go away together.
 
 ## Why this is still the right direction
 
