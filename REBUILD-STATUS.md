@@ -11,7 +11,7 @@ and connectivity decides. Everything else is better, most of it by a lot.
 | `sonde xilinx`, two layers | connections | copper | DRC | time |
 |---|---|---|---|---|
 | `main` | **66 / 66** | 718.4 mm | 0 | 324 s |
-| this branch | 65 / 66 | **692.3 mm** | 0 | **32 s** |
+| this branch | 65 / 66 | **692.5 mm** | 0 | **46 s** |
 
 Both are KiCad's own demo boards. DRC is `kicad-cli pcb drc --format json --severity-all`.
 Neither router places vias, so 66/66 on two layers is known to be reachable.
@@ -78,19 +78,34 @@ The constraint-edge machinery was built, measured identical with and without, an
 
 ## What is left
 
-**One connection on `sonde xilinx`**, and it is understood rather than mysterious. `/TD0-PROG-D4`
-fits as soon as two tracks are lifted; one of those two then cannot come back, because its only
-blocker is the connection just placed. Rip-up was extended to cascade three deep, to try each of
-the placed connection's own alternative routes, and to re-run the whole board with the failed
-connection going down first. None of it helps: those two connections conflict irreducibly given
-that each takes a *shortest* path.
+**One connection on `sonde xilinx`, and it now fails in geometry, not topology.** The stack
+search routes all 66 — with vias when they are worth it — and converges in one round. The drop
+happens later, in the check phase: the failing pair needs one of two tracks to take a
+deliberately *non-shortest* path, and every mechanism in the check (rip-up three deep,
+alternative routes, re-ordering) only ever offers shortest paths. The fix is the one already
+named: pull each wire taut against its neighbours' actual geometry rather than checking
+afterwards, so "shortest given the others" replaces "shortest, then checked".
 
-That is the structural gap. `main` gets this connection with five minutes of relaxation, which
-can push a settled track aside by a fraction of a millimetre. This branch has no such move —
-every connection is either its taut path or the solver's shortest, with nothing in between. The
-fix is to make the embedding itself aware of the tracks already down, so a wire can be pulled
-taut *against* its neighbours rather than checked against them afterwards. That is also what
-would let the 18 remaining fallbacks go away, and with them most of the 32 s.
+## Vias
+
+Layer assignment alone can only two-colour the graph of which nets would cross which — a bet
+that the graph is bipartite, which three pairwise-crossing nets settle on any real board. So
+the topology now searches the whole stack at once: nodes are *(layer, triangle)*, and a via is
+an edge with a price, negotiated exactly like doorway capacity — a site holds one via, and
+wanting a taken one costs more each round. Sites are found from the geometry: centroids of free
+triangles, clear of copper on every layer by radius plus clearance, through vias only.
+
+Which side of each other two wires pass is decided before the search as a layer *preference*
+(from which straight pad-to-pad lines cross which — the thing that fixed the crossings); the
+search pays 35% over cost to leave its side, which it will do to reach a via but not to save a
+corner. Crossing pressure inside the negotiation was tried and does not converge (5, 5, 4, 4,
+6 on ecc83-pp): a route with few doorways has nowhere to be pushed to, so the choice has to be
+made once, not bargained over.
+
+Neither demo board buys a via at the standing price — both route to the same quality as the
+per-layer search, so the capability costs nothing until a board needs it. It is proven by tests
+that force a layer change (start reachable only on the front, goal only on the back) and by
+`ecc83-pp` routing identically when vias are free.
 
 ## Why this is still the right direction
 
