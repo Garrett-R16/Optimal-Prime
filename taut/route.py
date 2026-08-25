@@ -56,6 +56,17 @@ class Track:
 
 
 @dataclass(frozen=True, slots=True)
+class Via:
+    """A through via: the same hole on every copper layer, so a net can change sides."""
+
+    net: int
+    x: int
+    y: int
+    diameter_nm: int
+    drill_nm: int
+
+
+@dataclass(frozen=True, slots=True)
 class ArcTrack:
     net: int
     layer: str
@@ -72,6 +83,7 @@ class ArcTrack:
 @dataclass
 class RouteResult:
     tracks: list[Track | ArcTrack] = field(default_factory=list)
+    vias: list[Via] = field(default_factory=list)
     routed: list[tuple[int, str]] = field(default_factory=list)
     failed: list[tuple[int, str, str]] = field(default_factory=list)
     stats: dict = field(default_factory=dict)

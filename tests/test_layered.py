@@ -140,6 +140,28 @@ def test_a_via_splits_the_route_into_legs_that_meet_at_it():
     for before, after in zip(route.legs, route.legs[1:]):
         assert before.goal == after.start
     assert len(route.vias) == len(route.legs) - 1
+    # A via is only worth drilling if the legs it joins are on different layers.
+    for before, after in zip(route.legs, route.legs[1:]):
+        assert before.layer != after.layer
+
+
+def test_a_connection_that_has_to_change_layer_takes_a_via():
+    """Start reachable only on the front, goal only on the back: it must hop, or fail."""
+    meshes = two_layers()
+    sites = via_sites(meshes, radius=0.6 * MM, clearance=0.2 * MM)
+    start, goal = (4.0 * MM, 20.0 * MM), (36.0 * MM, 20.0 * MM)
+
+    def one_way(point):
+        rings = [mesh.terminals(*point) for mesh in meshes]
+        return [rings[0], []] if point == start else [[], rings[1]]
+
+    routes, report = route_stack(meshes, sites, [(0, 1, start, goal)],
+                                 terminals=one_way, rounds=2)
+    route = routes[0]
+    assert report.routed == 1
+    assert len(route.vias) == 1
+    assert [leg.layer for leg in route.legs] == [0, 1]
+    assert route.legs[0].goal == route.legs[1].start
 
 
 def test_a_free_via_is_taken_and_a_dear_one_is_not():

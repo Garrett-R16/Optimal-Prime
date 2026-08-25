@@ -66,6 +66,19 @@ def _segment_node(track: Track, uuid: str) -> Node:
     ]
 
 
+def _via_node(via, layers: tuple[str, ...], uuid: str) -> Node:
+    """A through via, named by the outermost copper layers it joins."""
+    return [
+        sym("via"),
+        [sym("at"), num(nm_to_mm(via.x)), num(nm_to_mm(via.y))],
+        [sym("size"), num(nm_to_mm(via.diameter_nm))],
+        [sym("drill"), num(nm_to_mm(via.drill_nm))],
+        [sym("layers"), quoted(layers[0]), quoted(layers[-1])],
+        [sym("net"), num(via.net)],
+        [sym("uuid"), quoted(uuid)],
+    ]
+
+
 def _arc_node(track: ArcTrack, uuid: str) -> Node:
     return [
         sym("arc"),
@@ -87,6 +100,10 @@ def emit(board: Board, result: RouteResult, seed: str = "taut") -> str:
         uuid = _uuid(seed, index)
         tree.append(_arc_node(track, uuid) if isinstance(track, ArcTrack)
                     else _segment_node(track, uuid))
+
+    copper = tuple(board.copper_layers)
+    for index, via in enumerate(result.vias):
+        tree.append(_via_node(via, copper, _uuid(seed, len(result.tracks) + index)))
     return sexpr.dumps(tree)
 
 

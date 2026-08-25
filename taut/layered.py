@@ -40,6 +40,11 @@ VIA_COST_NM = 6_000_000.0
 #: through fewer, wider gaps.
 PORTAL_PENALTY_NM = 25_000.0
 
+#: How much dearer a layer is that a connection would rather not be on. Small: enough that it
+#: keeps to the side it was asked to, not so much that it would sooner go round the board than
+#: change over.
+OFF_PREFERENCE = 1.35
+
 
 @dataclass
 class Leg:
@@ -83,6 +88,7 @@ class StackReport:
     routed: int = 0
     unroutable: int = 0
     vias: int = 0
+    tangled: int = 0
     overfull: list = field(default_factory=list)
     converged: bool = False
 
@@ -94,11 +100,23 @@ def _midpoint(mesh: Mesh, key: tuple[int, int]) -> tuple[float, float]:
 
 def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             start_tris: list[list[int]], goal_tris: list[list[int]], net: int,
-            price, via_cost: float, node_limit: int = 600_000):
+            price, via_cost: float, prefer: int | None = None,
+            bias: float = 1.0, node_limit: int = 600_000):
     """A* over (layer, triangle), stepping doorway to doorway and layer to layer."""
     goals = {(layer, tri) for layer, tris in enumerate(goal_tris) for tri in tris}
     if not goals or not any(start_tris):
         return None
+
+    # If the two ends are in the same place on some layer and nothing is between them, the
+    # answer is the straight line and there is nothing to choose. Sending it through a doorway
+    # anyway to keep the bookkeeping uniform costs a few millimetres on every short hop, which
+    # on ecc83-pp came to 22 mm over twenty connections.
+    order = ([prefer] if prefer is not None else []) + [
+        index for index in range(len(meshes)) if index != prefer]
+    for layer in order:
+        together = set(start_tris[layer]) & set(goal_tris[layer])
+        if together and meshes[layer].clear_between(start, goal):
+            return [(layer, next(iter(together)), ("d",))]
 
     gx, gy = goal
     cache: dict[tuple[int, tuple[int, int]], tuple[float, float]] = {}
@@ -134,8 +152,10 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
     origins = {(layer, tri) for layer, tris in enumerate(start_tris) for tri in tris}
     for layer, tri in sorted(origins):
         _expand(meshes, sites, by_triangle, layer, tri, origins, price, net, via_cost,
-                lambda state, charge, extra: relax(0.0, state, None, start[0], start[1],
-                                                   charge, extra))
+                lambda state, charge, extra: relax(
+                    0.0, state, None, start[0], start[1],
+                    charge * (bias if prefer is not None and state[0] != prefer else 1.0),
+                    extra))
 
     expanded = 0
     final = None
@@ -153,7 +173,9 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
         px, py = where(layer, marker)
         _expand(meshes, sites, by_triangle, layer, tri, set(), price, net, via_cost,
                 lambda nxt, charge, extra, _c=cost, _s=state, _p=(px, py):
-                relax(_c, nxt, _s, _p[0], _p[1], charge, extra) if nxt[2] != marker else None)
+                relax(_c, nxt, _s, _p[0], _p[1],
+                      charge * (bias if prefer is not None and nxt[0] != prefer else 1.0),
+                      extra) if nxt[2] != marker else None)
 
     if final is None:
         return None
@@ -186,20 +208,99 @@ def _expand(meshes, sites, by_triangle, layer: int, tri: int, skip, price, net: 
             landing = site.triangle_on(other_layer)
             if not meshes[other_layer].free[landing]:
                 continue
-            offer((other_layer, landing, ("v", index)), 1.0,
+            # The marker carries the layer being left as well as the site. Without it the
+            # only layer recorded is the one arrived on, and the leg *up to* the via gets
+            # closed with the layer on the far side of it -- so both legs come out on the
+            # same face and the via joins a track to itself.
+            offer((other_layer, landing, ("v", index, layer)), 1.0,
                   via_cost * price(("via", index), net, 1))
+
+
+def _crosses(ax, ay, bx, by, cx, cy, dx, dy) -> bool:
+    def wind(px, py, qx, qy, rx, ry):
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+    d1 = wind(cx, cy, dx, dy, ax, ay)
+    d2 = wind(cx, cy, dx, dy, bx, by)
+    d3 = wind(ax, ay, bx, by, cx, cy)
+    d4 = wind(ax, ay, bx, by, dx, dy)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def _chain(mesh: Mesh, leg: Leg) -> list[tuple[float, float]]:
+    return [leg.start] + [_midpoint(mesh, key) for key in leg.portals] + [leg.goal]
+
+
+def _tangles(meshes: list[Mesh], routes: list[Route]):
+    """Pairs of routes that would cross, and roughly where.
+
+    Two wires on one layer crossing is a short, and no amount of pulling them taut afterwards
+    separates them -- which side of each other they pass is settled here or not at all. It is
+    also exactly what a via is for, so a crossing is priced like any other contested resource
+    and the search decides for itself whether changing layer is worth less than going round.
+    """
+    chains: dict[int, list[tuple[Route, list[tuple[float, float]]]]] = {}
+    for route in routes:
+        if not route.found:
+            continue
+        for leg in route.legs:
+            chains.setdefault(leg.layer, []).append((route, _chain(meshes[leg.layer], leg)))
+
+    out = []
+    for items in chains.values():
+        boxes = [(min(x for x, _ in pts), min(y for _, y in pts),
+                  max(x for x, _ in pts), max(y for _, y in pts)) for _, pts in items]
+        for first in range(len(items)):
+            route_a, path_a = items[first]
+            for second in range(first + 1, len(items)):
+                route_b, path_b = items[second]
+                if route_a.net == route_b.net:
+                    continue
+                one, two = boxes[first], boxes[second]
+                if (one[2] < two[0] or two[2] < one[0]
+                        or one[3] < two[1] or two[3] < one[1]):
+                    continue
+                where = _where_crossed(path_a, path_b)
+                if where is not None:
+                    out.append((route_a, route_b, where))
+    return out
+
+
+def _where_crossed(first, second):
+    for pa, pb in zip(first, first[1:]):
+        for qa, qb in zip(second, second[1:]):
+            if _crosses(pa[0], pa[1], pb[0], pb[1], qa[0], qa[1], qb[0], qb[1]):
+                return (pa[0] + pb[0] + qa[0] + qb[0]) / 4.0, (pa[1] + pb[1] + qa[1] + qb[1]) / 4.0
+    return None
+
+
+def _blame(meshes: list[Mesh], route: Route, where, history: dict) -> None:
+    """Make the doorway nearest a crossing dearer for the route that used it."""
+    best, resource = math.inf, None
+    for leg in route.legs:
+        for key in leg.portals:
+            mx, my = _midpoint(meshes[leg.layer], key)
+            reach = math.hypot(mx - where[0], my - where[1])
+            if reach < best:
+                best, resource = reach, ("portal", leg.layer, key)
+    if resource is not None:
+        history[resource] = history.get(resource, 0.0) + 1.0
 
 
 def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 terminals, via_cost: float = VIA_COST_NM, rounds: int = 12,
-                present: float = 0.6, verbose: bool = False):
+                present: float = 0.6, bias: float = OFF_PREFERENCE,
+                verbose: bool = False):
     """Choose a route for every connection at once, over the whole stack.
 
     ``requests`` are ``(key, net, start, goal)``; ``terminals(point)`` gives, per layer, the
     free triangles a connection may leave that point by -- empty for a layer the pad is not on.
     """
-    routes = [Route(key=key, net=net, start=start, goal=goal)
-              for key, net, start, goal in requests]
+    #: Which layer each connection would rather be on, worked out before any search from
+    #: which straight pad-to-pad lines cross which. It is a preference and not a rule: the
+    #: search pays a little more to leave it, which it will do to reach a via.
+    wanted = {entry[0]: (entry[4] if len(entry) > 4 else None) for entry in requests}
+    routes = [Route(key=entry[0], net=entry[1], start=entry[2], goal=entry[3])
+              for entry in requests]
     report = StackReport()
     by_triangle = sites_by_triangle(sites, len(meshes))
 
@@ -232,10 +333,12 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
         for route in routes:
             walk = _search(meshes, sites, by_triangle, route.start, route.goal,
                            reach(route.start), reach(route.goal), route.net,
-                           price, via_cost)
+                           price, via_cost, wanted.get(route.key), bias)
             _rebuild(route, walk, sites)
             for resource in route.uses():
                 usage.setdefault(resource, set()).add(route.net)
+
+        tangled = _tangles(meshes, routes)
 
         overfull = []
         for resource, holders in usage.items():
@@ -251,18 +354,25 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
             print(f"  round {report.rounds}: "
                   f"{sum(1 for r in routes if r.found)}/{len(routes)} routed, "
                   f"{sum(len(r.vias) for r in routes)} vias, "
-                  f"{len(overfull)} resources over capacity")
+                  f"{len(overfull)} resources over capacity, "
+                  f"{len(tangled)} pairs crossing")
 
         if not overfull:
             report.converged = True
             break
         for resource in overfull:
             history[resource] = history.get(resource, 0.0) + 1.0
+        # Crossings are counted but not priced. Charging the doorway nearest one does move
+        # the route, and then it comes back: measured on ecc83-pp the count went 5, 5, 4, 4,
+        # 6 and never settled, because a route with few doorways has nowhere to be pushed to.
+        # Which side of each other two wires pass is decided by the layer preference above,
+        # where it converges because it is decided once.
 
     report.routed = sum(1 for route in routes if route.found)
     report.unroutable = len(routes) - report.routed
     report.vias = sum(len(route.vias) for route in routes)
     report.overfull = overfull
+    report.tangled = len(tangled)
     return routes, report
 
 
@@ -273,11 +383,17 @@ def _rebuild(route: Route, walk, sites: list[Site]) -> None:
     if not walk:
         return
 
-    leg = Leg(layer=walk[0][0], start=route.start, goal=route.goal)
+    opening = walk[0][2][2] if walk[0][2][0] == "v" else walk[0][0]
+    leg = Leg(layer=opening, start=route.start, goal=route.goal)
     for layer, tri, marker in walk:
+        if marker[0] == "d":
+            leg.layer = layer
+            leg.triangles.append(tri)
+            continue
         if marker[0] == "v":
             site = sites[marker[1]]
             leg.goal = (site.x, site.y)
+            leg.layer = marker[2]
             route.legs.append(leg)
             route.vias.append(marker[1])
             leg = Leg(layer=layer, start=(site.x, site.y), goal=route.goal)

@@ -38,12 +38,15 @@ from .rubberband import Wire as RbWire, _segments_cross, rubberband, to_geometry
 from .rubberband import spacing_between
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
-from .route import (ArcTrack, RouteResult, Track, _board_boundary, _convex_hull,
+from .route import (ArcTrack, RouteResult, Track, Via, _board_boundary, _convex_hull,
                     _copper_shape_obstacles, _path_obstacles, _solve_lazily,
                     MIN_PIECE_NM, MIN_SAGITTA_NM)
-from .tangent import NoPathFound, PathArc, PathLine, TautPath
+from .tangent import (NoPathFound, PathArc, PathLine, TautPath,
+                      segment_to_obstacle)
 from .tangent import violated_obstacles
-from .topo import Route, route_topology
+from .layered import route_stack
+from .topo import Route
+from .vias import via_sites
 from .units import CLEARANCE_MARGIN, GUARDBAND_NM
 
 __all__ = ["plan_board"]
@@ -125,8 +128,49 @@ class _Link:
     clearance: float
     halo: float
     layer: str | None = None
+    #: the connection this piece belongs to. A via splits one connection into several, and
+    #: none of them is worth anything on its own -- a via with copper on one side only is a
+    #: hole in the board, so either every piece goes down or none of them does.
+    parent: int = -1
+    #: the leg of the stack route this piece came from, once topology has chosen one
+    route: object | None = None
     elements: list = field(default_factory=list)
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ViaPoint:
+    """One end of a leg that is a via rather than a pad.
+
+    A through via reaches every copper layer, so a leg ending at one may sit on any of them --
+    which is what lets the repair below move a leg to the other side without breaking the
+    connection.
+    """
+
+    x: float
+    y: float
+    net: int
+    #: the connection this via belongs to, so it can be left off the board if that
+    #: connection does not go down whole
+    owner: int
+    diameter: int
+    drill: int
+
+    def on_layer(self, _layer: str) -> bool:
+        return True
+
+
+def _pad_like(pad):
+    """Both kinds of leg end answer to the same three things, so nothing else has to care."""
+    return pad
+
+
+def _as_route(link: "_Link") -> Route:
+    """One leg, in the shape the embedding has always taken."""
+    return Route(key=link.key, net=link.net.code,
+                 start=(float(link.pad_a.x), float(link.pad_a.y)),
+                 goal=(float(link.pad_b.x), float(link.pad_b.y)),
+                 triangles=list(link.route.triangles), portals=list(link.route.portals))
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,81 +746,126 @@ def plan_board(board: Board, layers: list[str] | None = None,
             print(f"  {layer}: {int(mesh.free.sum())} free triangles, "
                   f"{len(mesh.portals)} portals")
 
-    # Assign each link to a layer by asking each layer what it would cost, rather than by
-    # counting how many links are already on it. Load-balancing blind puts short links on a
-    # crowded face and long ones on an empty one purely by arrival order, and nothing
-    # afterwards revisits the choice.
-    def portal_chain_length(mesh: Mesh, route) -> float:
-        if not route.found:
-            return math.inf
-        points = [route.start]
-        for key in route.portals:
-            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
-            points.append(((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0))
-        points.append(route.goal)
-        return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+    # Where a via could go, and then one search over the whole stack rather than one per
+    # layer with the layer decided beforehand. See taut.layered for why that matters.
+    via_radius = max((board.netclass_for(link.net.name).via_diameter_nm
+                      for link in links), default=800_000) / 2.0
+    sites = via_sites([meshes[layer] for layer in usable], via_radius, clearance,
+                      inside=lambda x, y: _inside(polygon, x, y))
+    if verbose:
+        print(f"  {len(sites)} places a via could go")
 
-    def would_cross(link: _Link, other: _Link) -> bool:
-        return (link.net.code != other.net.code
-                and _segments_cross(float(link.pad_a.x), float(link.pad_a.y),
-                                    float(link.pad_b.x), float(link.pad_b.y),
+    reachable: dict[tuple[float, float], list[list[int]]] = {}
+    on_layer: dict[tuple[float, float], set[int]] = {}
+
+    def terminals(point):
+        found = reachable.get(point)
+        if found is None:
+            allowed = on_layer.get(point, set(range(len(usable))))
+            found = reachable[point] = [
+                meshes[layer].terminals(*point) if index in allowed else []
+                for index, layer in enumerate(usable)]
+        return found
+
+    def would_cross(one: _Link, other: _Link) -> bool:
+        return (one.net.code != other.net.code
+                and _segments_cross(float(one.pad_a.x), float(one.pad_a.y),
+                                    float(one.pad_b.x), float(one.pad_b.y),
                                     float(other.pad_a.x), float(other.pad_a.y),
                                     float(other.pad_b.x), float(other.pad_b.y)))
 
-    # Two wires on one layer must not cross, and most of them are straight: with the corridor
-    # right, a taut wire wraps nothing at all unless something is in its way. So the straight
-    # line between two pads predicts almost exactly which pairs will fight, and it costs a
-    # cross product to ask. Crossings decide the layer; the topological probe -- much the more
-    # expensive question -- is only asked to break a tie.
-    by_layer: dict[str, list[_Link]] = {layer: [] for layer in usable}
+    # Which side each connection would rather be on, from which straight pad-to-pad lines
+    # cross which. With the corridor right a taut wire wraps nothing unless something is in
+    # its way, so that line predicts almost exactly which pairs will fight -- and it costs a
+    # cross product to ask. The search is told this as a preference, not a rule: two wires
+    # that must cross whatever is done about the layers can still buy a via instead.
+    taken: dict[int, list[_Link]] = {index: [] for index in range(len(usable))}
+    prefer: dict[int, int | None] = {}
     for link in sorted(links, key=lambda l: -l.span):
-        options = [layer for layer in usable
-                   if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]
+        options = [index for index, name in enumerate(usable)
+                   if link.pad_a.on_layer(name) and link.pad_b.on_layer(name)]
         if not options:
-            result.failed.append((link.net.code, link.net.name,
-                                  "pads share no usable layer (a via would be needed)"))
+            prefer[link.key] = None
             continue
-        if len(options) == 1:
-            link.layer = options[0]
-            by_layer[link.layer].append(link)
+        # Ties on crossings are broken by how much copper the straight line runs into on
+        # each side. Falling back to the lower-numbered layer instead puts everything that
+        # ties on the front, which is not a choice at all.
+        def obstructed(index: int, _link=link) -> int:
+            mesh = meshes[usable[index]]
+            return sum(1 for shape in mesh.obstacles
+                       if shape.net != _link.net.code
+                       and segment_to_obstacle(shape,
+                                               float(_link.pad_a.x), float(_link.pad_a.y),
+                                               float(_link.pad_b.x), float(_link.pad_b.y))
+                       <= shape.r)
+
+        best = min(options, key=lambda index: (sum(1 for other in taken[index]
+                                                   if would_cross(link, other)),
+                                               obstructed(index), index))
+        prefer[link.key] = best
+        taken[best].append(link)
+
+    requests = []
+    for link in links:
+        here = (float(link.pad_a.x), float(link.pad_a.y))
+        there = (float(link.pad_b.x), float(link.pad_b.y))
+        on_layer[here] = {i for i, name in enumerate(usable) if link.pad_a.on_layer(name)}
+        on_layer[there] = {i for i, name in enumerate(usable) if link.pad_b.on_layer(name)}
+        requests.append((link.key, link.net.code, here, there, prefer.get(link.key)))
+
+    chosen, stack_report = route_stack(
+        [meshes[layer] for layer in usable], sites, requests,
+        terminals=terminals, rounds=rounds, verbose=verbose)
+
+    topo_stats = {"rounds": stack_report.rounds, "overfull": len(stack_report.overfull),
+                  "unroutable": stack_report.unroutable, "vias": stack_report.vias,
+                  "converged": stack_report.converged}
+
+    # A via splits a connection into two connections that happen to meet at it, so from here
+    # on every piece is what it always was: one net, one layer, two fixed ends. Nothing
+    # downstream needs to learn about vias except the check, which must keep other nets off
+    # them, and the emitter.
+    pieces: list[_Link] = []
+    placed_vias: list[_ViaPoint] = []
+    by_route = {link.key: link for link in links}
+
+    for route in chosen:
+        parent = by_route[route.key]
+        if not route.found:
+            result.failed.append((parent.net.code, parent.net.name,
+                                  "no route through the free space on any layer"))
             continue
 
-        clashes = {layer: sum(1 for other in by_layer[layer] if would_cross(link, other))
-                   for layer in options}
-        fewest = min(clashes.values())
-        shortlist = [layer for layer in options if clashes[layer] == fewest]
+        stops = [_pad_like(parent.pad_a)]
+        for index in route.vias:
+            site = sites[index]
+            point = _ViaPoint(x=site.x, y=site.y, net=parent.net.code, owner=parent.key,
+                              diameter=board.netclass_for(parent.net.name).via_diameter_nm,
+                              drill=board.netclass_for(parent.net.name).via_drill_nm)
+            placed_vias.append(point)
+            stops.append(point)
+        stops.append(_pad_like(parent.pad_b))
 
-        if len(shortlist) == 1:
-            link.layer = shortlist[0]
-        else:
-            # Nothing to choose between them on crossings, so ask what the route would cost on
-            # an empty board. Contention is settled afterwards, by the negotiation.
-            request = [(link.key, link.net.code,
-                        (float(link.pad_a.x), float(link.pad_a.y)),
-                        (float(link.pad_b.x), float(link.pad_b.y)))]
-            best_layer, best_cost = shortlist[0], math.inf
-            for layer in shortlist:
-                probe, _ = route_topology(meshes[layer], request, rounds=1)
-                cost = portal_chain_length(meshes[layer], probe[0])
-                if cost < best_cost:
-                    best_layer, best_cost = layer, cost
-            link.layer = best_layer
+        for leg, (here, there) in zip(route.legs, zip(stops, stops[1:])):
+            piece = _Link(key=len(pieces), net=parent.net, pad_a=here, pad_b=there,
+                          span=math.dist((here.x, here.y), (there.x, there.y)),
+                          width=parent.width, clearance=parent.clearance,
+                          halo=parent.halo)
+            piece.parent = parent.key
+            piece.layer = usable[leg.layer]
+            piece.route = leg
+            pieces.append(piece)
+
+    links = pieces
+    by_layer: dict[str, list[_Link]] = {layer: [] for layer in usable}
+    for link in links:
         by_layer[link.layer].append(link)
-
-    topo_stats = {"rounds": 0, "overfull": 0, "unroutable": 0, "converged": True}
 
     for layer, group in by_layer.items():
         if not group:
             continue
         mesh = meshes[layer]
-        requests = [(link.key, link.net.code,
-                     (float(link.pad_a.x), float(link.pad_a.y)),
-                     (float(link.pad_b.x), float(link.pad_b.y))) for link in group]
-        routes, report = route_topology(mesh, requests, rounds=rounds, verbose=verbose)
-        topo_stats["rounds"] = max(topo_stats["rounds"], report.rounds)
-        topo_stats["overfull"] += len(report.overfull)
-        topo_stats["unroutable"] += report.unroutable
-        topo_stats["converged"] = topo_stats["converged"] and report.converged
+        routes = [_as_route(link) for link in group]
 
         order = _consistent(routes, _crossing_order(mesh, routes))
         wires = {link.key: RbWire(key=link.key, net=link.net.code,
@@ -821,6 +910,12 @@ def plan_board(board: Board, layers: list[str] | None = None,
             cached = [pad_obstacle(pad, clr, half) for pad in board.pads
                       if pad.on_layer(layer)]
             cached.extend(_copper_shape_obstacles(board, layer, clr + half))
+            # A via is on every layer, so it is in everyone's way on every layer -- including
+            # the layer whose leg does not touch it.
+            cached.extend(Obstacle(vertices=((via.x, via.y),),
+                                   r=via.diameter / 2.0 + clr + half,
+                                   net=via.net, label="via")
+                          for via in placed_vias)
             static_cache[key] = cached
         return cached
 
@@ -831,6 +926,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
     how: dict[int, str] = {}
 
     def candidates(link: _Link) -> list[str]:
+        # A leg that meets a via keeps the side topology put it on. A via is only worth
+        # drilling because the two legs are on different layers; let the repair move one of
+        # them for being a little shorter and they end up on the same side, and the via is a
+        # hole with copper on one face -- which KiCad calls dangling, and rightly.
+        if link.layer and (isinstance(link.pad_a, _ViaPoint)
+                           or isinstance(link.pad_b, _ViaPoint)):
+            return [link.layer]
         return [layer for layer in usable
                 if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]
 
@@ -1022,18 +1124,34 @@ def plan_board(board: Board, layers: list[str] | None = None,
     checked["rescued"] = len(rescued_links)
     checked["dropped"] = sum(1 for link in stranded if not link.elements)
 
+    # A connection is either on the board or it is not. Half of one -- copper up to a via
+    # and nothing on the other side -- is worse than none: the via is then a hole joined to
+    # one track, which is a defect in its own right rather than a missing connection.
+    whole: dict[int, bool] = {}
     for link in links:
-        if not link.elements:
-            if link.reason and not any(f[0] == link.net.code and f[2] == link.reason
-                                       for f in result.failed):
-                result.failed.append((link.net.code, link.net.name, link.reason))
+        whole[link.parent] = whole.get(link.parent, True) and bool(link.elements)
+
+    for owner, complete in sorted(whole.items()):
+        parent = by_route[owner]
+        if complete:
+            result.routed.append((parent.net.code, parent.net.name))
+            continue
+        excuse = next((link.reason for link in links
+                       if link.parent == owner and link.reason), "no legal geometry")
+        result.failed.append((parent.net.code, parent.net.name, excuse))
+
+    for link in links:
+        if not link.elements or not whole.get(link.parent):
             continue
         result.tracks.extend(_elements_to_tracks(link.elements, link.net.code,
                                                  link.layer, int(link.width)))
-        result.routed.append((link.net.code, link.net.name))
+
+    result.vias.extend(Via(net=via.net, x=int(round(via.x)), y=int(round(via.y)),
+                           diameter_nm=int(via.diameter), drill_nm=int(via.drill))
+                       for via in placed_vias if whole.get(via.owner))
 
     result.stats.update({
-        "connections": len(links),
+        "connections": len(whole),
         "routed": len(result.routed),
         "failed": len(result.failed),
         "tracks": len(result.tracks),

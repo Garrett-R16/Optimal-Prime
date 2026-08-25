@@ -103,21 +103,60 @@ class Mesh:
         nearest = self.triangle_at(x, y)
         return [nearest] if nearest >= 0 else []
 
+    def clear_between(self, start: tuple[float, float], goal: tuple[float, float],
+                      samples: int = 32) -> bool:
+        """Whether the straight line between two terminals stays in free space.
+
+        Both ends are pad centres, so both sit inside copper; a sample is allowed to be inside
+        an obstacle holding one of the endpoints, because that is the wire's own pad.
+        """
+        homes = [obstacle for obstacle in self.obstacles
+                 if obstacle.distance_to_point(*start) <= obstacle.r
+                 or obstacle.distance_to_point(*goal) <= obstacle.r]
+
+        for step in range(1, samples):
+            t = step / samples
+            x = start[0] + (goal[0] - start[0]) * t
+            y = start[1] + (goal[1] - start[1]) * t
+            if any(home.distance_to_point(x, y) <= home.r for home in homes):
+                continue
+            here = self._locate(x, y)
+            if here < 0 or not self.free[here]:
+                return False
+        return True
+
     def _locate(self, x: float, y: float) -> int:
-        for index in range(len(self.triangles)):
+        for index in self._near(x, y):
             if self._contains(index, x, y):
                 return index
         return -1
 
+    def _near(self, x: float, y: float):
+        """Triangles whose bounding box holds a point.
+
+        Scanning every triangle for every query is fine once and ruinous when the via search
+        asks a thousand times per layer; the boxes are one vectorised comparison and cut it to
+        the handful that could possibly contain the point.
+        """
+        boxes = getattr(self, "_boxes", None)
+        if boxes is None:
+            corners = self.points[self.triangles]
+            boxes = (corners[:, :, 0].min(axis=1), corners[:, :, 1].min(axis=1),
+                     corners[:, :, 0].max(axis=1), corners[:, :, 1].max(axis=1))
+            object.__setattr__(self, "_boxes", boxes)
+        low_x, low_y, high_x, high_y = boxes
+        return np.nonzero((low_x <= x) & (x <= high_x) & (low_y <= y) & (y <= high_y))[0]
+
     def triangle_at(self, x: float, y: float) -> int:
         """The free triangle containing a point, or the nearest one if it sits on an edge."""
-        best = -1
-        best_d = math.inf
+        for index in self._near(x, y):
+            if self.free[index] and self._contains(int(index), x, y):
+                return int(index)
+
+        best, best_d = -1, math.inf
         for index in range(len(self.triangles)):
             if not self.free[index]:
                 continue
-            if self._contains(index, x, y):
-                return index
             cx, cy = self.centroid(index)
             d = math.hypot(cx - x, cy - y)
             if d < best_d:
