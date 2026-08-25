@@ -62,7 +62,7 @@ def _portal_midpoint(mesh: Mesh, key: tuple[int, int]) -> tuple[float, float]:
     return (float((a[0] + b[0]) / 2), float((a[1] + b[1]) / 2))
 
 
-def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
+def _search(mesh: Mesh, start_tris: list[int], goal_tris: list[int], net: int,
             start: tuple[float, float], goal: tuple[float, float],
             cost_of, node_limit: int = 400_000) -> tuple[list[int], list[tuple[int, int]]]:
     """A* over doorways. Returns (triangle sequence, portal sequence).
@@ -86,10 +86,11 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
     and measured no better; nor did a flat charge per doorway crossed, which changed nothing
     until it was large enough to buy detours. Neither is worth giving up exactness for.
     """
-    if start_tri < 0 or goal_tri < 0:
+    if not start_tris or not goal_tris:
         return [], []
-    if start_tri == goal_tri:
-        return [start_tri], []
+    goals = set(goal_tris)
+    if goals & set(start_tris):
+        return [next(iter(goals & set(start_tris)))], []
 
     gx, gy = goal
     midpoints: dict[tuple[int, int], tuple[float, float]] = {}
@@ -117,7 +118,7 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
         mx, my = midpoint(state[1])
         step = math.hypot(mx - px, my - py) * cost_of(portal, net)
         rest = heuristic(mx, my)
-        if state[0] == goal_tri:
+        if state[0] in goals:
             # The last leg runs from the final doorway to the pad, so charge it here rather
             # than letting the goal triangle be crossed for free.
             step += rest
@@ -128,8 +129,12 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
             came[state] = previous
             heapq.heappush(heap, (total + rest, total, state))
 
-    for other, portal in mesh.adjacent(start_tri):
-        relax(0.0, (other, portal.key()), None, portal, start[0], start[1])
+    origins = set(start_tris)
+    for tri in start_tris:
+        for other, portal in mesh.adjacent(tri):
+            if other in origins:
+                continue
+            relax(0.0, (other, portal.key()), None, portal, start[0], start[1])
 
     expanded = 0
     final: State | None = None
@@ -138,7 +143,7 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
         if cost > best.get(state, math.inf):
             continue
         tri, entry = state
-        if tri == goal_tri:
+        if tri in goals:
             final = state
             break
         expanded += 1
@@ -162,7 +167,7 @@ def _search(mesh: Mesh, start_tri: int, goal_tri: int, net: int,
         triangles.append(tri)
         portals.append(key)
         cursor = came[cursor]
-    triangles.append(start_tri)
+    triangles.append(start_tris[0])
     triangles.reverse()
     portals.reverse()
     return triangles, portals
@@ -184,12 +189,12 @@ def route_topology(mesh: Mesh, requests, rounds: int = 12,
     history: dict[tuple[int, int], float] = {}
     present = 0.6
 
-    triangle_of: dict[tuple[float, float], int] = {}
+    triangle_of: dict[tuple[float, float], list[int]] = {}
 
-    def locate(point: tuple[float, float]) -> int:
+    def locate(point: tuple[float, float]) -> list[int]:
         cached = triangle_of.get(point)
         if cached is None:
-            cached = mesh.triangle_at(point[0], point[1])
+            cached = mesh.terminals(point[0], point[1])
             triangle_of[point] = cached
         return cached
 

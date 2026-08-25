@@ -77,6 +77,38 @@ class Mesh:
 
     # ------------------------------------------------------------------ lookup
 
+    def terminals(self, x: float, y: float) -> list[int]:
+        """Every free triangle a wire could leave this point by.
+
+        A pad centre is *inside* its own pad, so no free triangle contains it. Resolving it to
+        the single free triangle with the nearest centroid picks one arbitrary spot on the
+        pad's rim -- routinely the far side of it -- and the route then has to come back
+        around its own pad before it can set off. Handing the search the whole ring of free
+        triangles touching the pad instead lets it leave in whichever direction is actually
+        shortest, which is what a terminal on a pad means.
+        """
+        inside = self._locate(x, y)
+        if inside >= 0 and self.free[inside]:
+            return [inside]
+
+        for index, obstacle in enumerate(self.obstacles):
+            if obstacle.distance_to_point(x, y) > obstacle.r:
+                continue
+            ring = [tri for tri in range(len(self.triangles))
+                    if self.free[tri] and any(self.owner[v] == index
+                                              for v in self.triangles[tri])]
+            if ring:
+                return ring
+
+        nearest = self.triangle_at(x, y)
+        return [nearest] if nearest >= 0 else []
+
+    def _locate(self, x: float, y: float) -> int:
+        for index in range(len(self.triangles)):
+            if self._contains(index, x, y):
+                return index
+        return -1
+
     def triangle_at(self, x: float, y: float) -> int:
         """The free triangle containing a point, or the nearest one if it sits on an edge."""
         best = -1

@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 
 from .board import Board, Net, Pad
 from .funnel import Curve, Gate, Line, funnel, orient, taut_through
+from .rubberband import Arc as RbArc, Crossing, Segment as RbSegment
+from .rubberband import Wire as RbWire, rubberband, to_geometry
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
 from .route import (ArcTrack, RouteResult, Track, _board_boundary, _convex_hull,
@@ -49,6 +51,9 @@ __all__ = ["plan_board"]
 #: consulting the exact solver. Above it, both are computed and the shorter wins -- the check
 #: is cheap next to a wasted millimetre of copper and the space it denies everything after it.
 _KEEP_WITHOUT_ASKING = 1.25
+
+#: How many times to re-read the crossing order off the geometry and embed again.
+_SEATING_PASSES = 4
 
 
 # --------------------------------------------------------------------------- outline
@@ -135,14 +140,60 @@ def _mst_edges(pads):
     return out
 
 
+#: Facets per quarter turn when a round shape is given a boundary.
+#:
+#: A triangulation can only put vertices where it is given points, so a disc described by its
+#: centre alone has no vertices anywhere on its copper: the triangles around it span from one
+#: pad centre to the next, are mostly solid, and the gaps between them measure nothing real.
+#: On a dense board that fragmented the free space into seventy pieces, stranding two thirds
+#: of the connections on islands they could not leave. Facets put vertices on the boundary
+#: instead, where the actual gaps are.
+_FACETS_PER_QUARTER = 2
+
+
+def _faceted(obstacle: Obstacle) -> Obstacle:
+    """Re-describe a round shape by its boundary, so a triangulation can see its edges.
+
+    The polygon *circumscribes* the true shape -- vertices at ``r / cos(pi/n)`` rather than
+    ``r`` -- so the facets lie outside the copper everywhere. Over-covering costs a sliver of
+    routing room; under-covering would let a track clip the pad it was avoiding.
+    """
+    if obstacle.r <= 0.0 or len(obstacle.vertices) > 2:
+        return obstacle
+
+    steps = max(4, _FACETS_PER_QUARTER * 4)
+    reach = obstacle.r / math.cos(math.pi / steps)
+
+    if len(obstacle.vertices) == 1:
+        cx, cy = obstacle.vertices[0]
+        ring = [(cx + reach * math.cos(2 * math.pi * i / steps),
+                 cy + reach * math.sin(2 * math.pi * i / steps))
+                for i in range(steps)]
+    else:
+        # A capsule: half a ring about each end, oriented across its axis.
+        (ax, ay), (bx, by) = obstacle.vertices
+        axis = math.atan2(by - ay, bx - ax)
+        half = steps // 2
+        ring = [(bx + reach * math.cos(axis - math.pi / 2 + math.pi * i / half),
+                 by + reach * math.sin(axis - math.pi / 2 + math.pi * i / half))
+                for i in range(half + 1)]
+        ring += [(ax + reach * math.cos(axis + math.pi / 2 + math.pi * i / half),
+                  ay + reach * math.sin(axis + math.pi / 2 + math.pi * i / half))
+                 for i in range(half + 1)]
+
+    return Obstacle(vertices=tuple(ring), r=0.0, net=obstacle.net, label=obstacle.label)
+
+
 def _cores(board: Board, layer: str) -> list[Obstacle]:
-    """Obstacle *cores* -- actual copper, with no clearance baked in.
+    """Obstacle *cores* -- actual copper, with no routing clearance baked in.
 
     Clearance belongs to the embedding, where it narrows each doorway. Inflating here would
-    delete every triangle that touches a pad and leave no free space at all.
+    delete every triangle that touches a pad. Round shapes are faceted first, so the copper
+    they occupy is described by a boundary the triangulation can place vertices on.
     """
-    out = [pad_obstacle(pad, 0.0, 0.0) for pad in board.pads if pad.on_layer(layer)]
-    out.extend(_copper_shape_obstacles(board, layer, 0.0))
+    out = [_faceted(pad_obstacle(pad, 0.0, 0.0)) for pad in board.pads
+           if pad.on_layer(layer)]
+    out.extend(_faceted(shape) for shape in _copper_shape_obstacles(board, layer, 0.0))
     return out
 
 
@@ -199,6 +250,141 @@ def _gates_for(mesh: Mesh, route: Route, slot_of, clearance: float, width: float
         ))
 
     return gates
+
+
+def _crossing_order(mesh: Mesh, routes) -> dict[tuple[int, int], list[int]]:
+    """Put the routes sharing each doorway into an order across it.
+
+    Only the order is kept. Where a wire actually sits is never recorded, because it is not a
+    property of the wire: the distance it stands off a corner is the accumulated width of
+    whatever lies between it and *that* corner, and that differs at every corner it passes.
+    Seating wires at fixed positions instead -- an equal share of each doorway, decided once --
+    is what made a bundle spread correctly in one gap and waste half of the next.
+
+    The order itself comes from where each route's local chord crosses the doorway, which is a
+    good enough guess to start from and, being an order rather than a position, survives the
+    embedding changing every coordinate underneath it.
+    """
+    seats: dict[tuple[int, int], list[tuple[float, int]]] = {}
+
+    for route in routes:
+        if not route.found:
+            continue
+        points = [route.start]
+        for key in route.portals:
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            points.append(((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0))
+        points.append(route.goal)
+
+        for index, key in enumerate(route.portals):
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            dx, dy = float(pb[0] - pa[0]), float(pb[1] - pa[1])
+            before, after = points[index], points[index + 2]
+            ex, ey = after[0] - before[0], after[1] - before[1]
+            denominator = dx * ey - dy * ex
+            if abs(denominator) < 1e-9:
+                mid = ((before[0] + after[0]) / 2.0, (before[1] + after[1]) / 2.0)
+                span = dx * dx + dy * dy
+                where = (((mid[0] - pa[0]) * dx + (mid[1] - pa[1]) * dy) / span
+                         if span > 1e-9 else 0.5)
+            else:
+                where = ((before[0] - pa[0]) * ey - (before[1] - pa[1]) * ex) / denominator
+            seats.setdefault(key, []).append((min(1.0, max(0.0, where)), route.key))
+
+    return {key: [route_key for _, route_key in sorted(value)]
+            for key, value in seats.items()}
+
+
+def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire]) -> list[Crossing]:
+    """The doorways on one route, each carrying the full crossing order and this wire's rank."""
+    out: list[Crossing] = []
+    for key in route.portals:
+        holders = order.get(key) or [route.key]
+        if route.key not in holders:
+            holders = list(holders) + [route.key]
+        pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+        out.append(Crossing(
+            ax=float(pa[0]), ay=float(pa[1]), bx=float(pb[0]), by=float(pb[1]),
+            order=tuple(wires[k] for k in holders), mine=holders.index(route.key),
+            ra=float(mesh.radius[key[0]]), rb=float(mesh.radius[key[1]]),
+        ))
+    return out
+
+
+def _flatten(start, goal, elements, per_arc: int = 12) -> list[tuple[float, float]]:
+    """The embedded path as a polyline, for asking where it crosses a doorway."""
+    points = [start]
+    for element in elements:
+        if isinstance(element, Line):
+            points.append((element.x2, element.y2))
+        else:
+            sweep = element.sweep
+            for step in range(1, per_arc + 1):
+                angle = element.start_angle + sweep * step / per_arc
+                points.append((element.cx + element.r * math.cos(angle),
+                               element.cy + element.r * math.sin(angle)))
+    points.append(goal)
+    return points
+
+
+def _order_from_geometry(mesh: Mesh, routes, elements) -> dict[tuple[int, int], list[int]]:
+    """Re-read the crossing order off the geometry that was just embedded.
+
+    The order is the one thing the embedding depends on and the one thing it cannot be told
+    reliably in advance: guessing it from a straight chord gets a wire ranked outermost at one
+    doorway and third at the next, and an offset stack computed from that puts the wire on the
+    far side of a gap it was supposed to hug. Reading it back off real geometry and embedding
+    again settles it, usually within two passes.
+    """
+    seats: dict[tuple[int, int], list[tuple[float, int]]] = {}
+
+    for route in routes:
+        if not route.found or route.key not in elements:
+            continue
+        polyline = _flatten(route.start, route.goal, elements[route.key])
+        cursor = 0
+        for key in route.portals:
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            ax, ay = float(pa[0]), float(pa[1])
+            dx, dy = float(pb[0]) - ax, float(pb[1]) - ay
+            span = dx * dx + dy * dy
+            where = None
+            for step in range(cursor, len(polyline) - 1):
+                (px, py), (qx, qy) = polyline[step], polyline[step + 1]
+                ex, ey = qx - px, qy - py
+                denominator = dx * ey - dy * ex
+                if abs(denominator) < 1e-12:
+                    continue
+                t = ((px - ax) * ey - (py - ay) * ex) / denominator
+                u = ((px - ax) * dy - (py - ay) * dx) / denominator
+                if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+                    where, cursor = t, step
+                    break
+            if where is None:
+                # The path never reaches this doorway -- fall back to the nearest approach, so
+                # a wire that has drifted still gets a rank rather than dropping out of the
+                # bundle entirely.
+                best = min(range(len(polyline)),
+                           key=lambda step: (polyline[step][0] - ax - dx / 2) ** 2
+                           + (polyline[step][1] - ay - dy / 2) ** 2)
+                px, py = polyline[best]
+                where = (((px - ax) * dx + (py - ay) * dy) / span) if span > 1e-12 else 0.5
+            seats.setdefault(key, []).append((min(1.0, max(0.0, where)), route.key))
+
+    return {key: [route_key for _, route_key in sorted(value)]
+            for key, value in seats.items()}
+
+
+def _rubberband_elements(start, goal, crossings) -> list:
+    """Pull one wire taut and hand back pieces the checker and emitter already understand."""
+    out = []
+    for piece in to_geometry(start, goal, rubberband(start, goal, crossings)):
+        if isinstance(piece, RbSegment):
+            out.append(Line(piece.x1, piece.y1, piece.x2, piece.y2))
+        else:
+            out.append(Curve(piece.cx, piece.cy, piece.r,
+                             piece.start_angle, piece.end_angle, piece.ccw))
+    return out
 
 
 def _clears_boundary(path: TautPath, boundary, gap: float) -> bool:
@@ -323,7 +509,20 @@ def plan_board(board: Board, layers: list[str] | None = None,
             print(f"  {layer}: {int(mesh.free.sum())} free triangles, "
                   f"{len(mesh.portals)} portals")
 
-    # Assign each link to a layer, then choose topology per layer.
+    # Assign each link to a layer by asking each layer what it would cost, rather than by
+    # counting how many links are already on it. Load-balancing blind puts short links on a
+    # crowded face and long ones on an empty one purely by arrival order, and nothing
+    # afterwards revisits the choice.
+    def portal_chain_length(mesh: Mesh, route) -> float:
+        if not route.found:
+            return math.inf
+        points = [route.start]
+        for key in route.portals:
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            points.append(((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0))
+        points.append(route.goal)
+        return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+
     by_layer: dict[str, list[_Link]] = {layer: [] for layer in usable}
     for link in links:
         options = [layer for layer in usable
@@ -332,9 +531,24 @@ def plan_board(board: Board, layers: list[str] | None = None,
             result.failed.append((link.net.code, link.net.name,
                                   "pads share no usable layer (a via would be needed)"))
             continue
-        # Spread across layers by current load, so one face does not absorb everything.
-        link.layer = min(options, key=lambda l: len(by_layer[l]))
-        by_layer[link.layer].append(link)
+        if len(options) == 1:
+            link.layer = options[0]
+            by_layer[link.layer].append(link)
+            continue
+
+        # Probe each candidate on an empty board -- what the route costs before anyone else
+        # is on it. Contention is settled afterwards, by the negotiation.
+        best_layer, best_cost = options[0], math.inf
+        request = [(link.key, link.net.code,
+                    (float(link.pad_a.x), float(link.pad_a.y)),
+                    (float(link.pad_b.x), float(link.pad_b.y)))]
+        for layer in options:
+            probe, _ = route_topology(meshes[layer], request, rounds=1)
+            cost = portal_chain_length(meshes[layer], probe[0])
+            if cost < best_cost:
+                best_layer, best_cost = layer, cost
+        link.layer = best_layer
+        by_layer[best_layer].append(link)
 
     topo_stats = {"rounds": 0, "overfull": 0, "unroutable": 0, "converged": True}
 
@@ -351,35 +565,35 @@ def plan_board(board: Board, layers: list[str] | None = None,
         topo_stats["unroutable"] += report.unroutable
         topo_stats["converged"] = topo_stats["converged"] and report.converged
 
-        # Seat the nets across every shared portal.
-        users: dict[tuple[int, int], list[int]] = {}
-        for route in routes:
-            for key in route.portals:
-                if route.net not in users.setdefault(key, []):
-                    users[key].append(route.net)
+        order = _crossing_order(mesh, routes)
+        wires = {link.key: RbWire(key=link.key, net=link.net.code,
+                                  half_width=link.width / 2.0,
+                                  clearance=link.clearance + GUARDBAND_NM)
+                 for link in group}
 
-        def slot_of(key, route, _users=users):
-            holders = _users.get(key, [route.net])
-            try:
-                return holders.index(route.net), len(holders)
-            except ValueError:
-                return 0, max(1, len(holders))
-
+        # Embed, re-read the order off the result, embed again. The first order is a guess
+        # from straight chords; two or three passes is enough for it to stop changing.
         index = {link.key: link for link in group}
+        elements: dict[int, list] = {}
+        for _pass in range(_SEATING_PASSES):
+            elements = {route.key: _rubberband_elements(
+                            route.start, route.goal,
+                            _crossings_for(mesh, route, order, wires))
+                        for route in routes if route.found}
+            settled_order = _order_from_geometry(mesh, routes, elements)
+            if settled_order == order:
+                break
+            order = settled_order
+
         for route in routes:
             link = index[route.key]
             if not route.found:
                 link.reason = "no route through the free space"
                 continue
-            gates = _gates_for(mesh, route, slot_of, clearance, width, link.halo)
-            if gates is None:
-                link.reason = "a doorway on the route is too narrow for its slot"
-                continue
-            wraps = funnel(route.start, route.goal, gates)
-            link.elements = taut_through(route.start, route.goal, wraps)
+            link.elements = elements.get(route.key, [])
 
     # ---- check the geometry, and repair what does not hold --------------------------
-    checked = {"funnelled": 0, "fell_back": 0, "dropped": 0}
+    checked = {"taut": 0, "fell_back": 0, "dropped": 0}
     boundary = _board_boundary(board)
 
     static_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
@@ -418,32 +632,47 @@ def plan_board(board: Board, layers: list[str] | None = None,
         # the previous one had been rejected outright. So a wandering path is measured
         # against what the exact solver would do, and the shorter one wins.
         if legal and path.length <= link.span * _KEEP_WITHOUT_ASKING:
-            checked["funnelled"] += 1
+            checked["taut"] += 1
             settled[link.layer].append((link.net.code, path, link.halo))
             continue
 
         # Either the construction did not hold, or it held but wandered. Ask the exact
         # solver, which chooses its own class -- worse topology, but geometry that is
         # certainly legal and, when the funnel wandered, usually much shorter.
+        # The fallback may also change layer. Pinning it to whichever face topology chose
+        # strands a connection on a crowded one when the other is empty.
         alternative = None
-        try:
-            alternative = _solve_lazily(
-                (float(link.pad_a.x), float(link.pad_a.y)),
-                (float(link.pad_b.x), float(link.pad_b.y)), blockers,
-                boundary=boundary, boundary_gap=edge_gap)
-        except NoPathFound as exc:
-            if not legal:
-                link.elements = []
-                link.reason = f"funnel geometry rejected and no fallback path: {exc}"
-                checked["dropped"] += 1
+        alt_layer = link.layer
+        for candidate in [layer for layer in usable
+                          if link.pad_a.on_layer(layer) and link.pad_b.on_layer(layer)]:
+            here = [o for o in statics(candidate, link.clearance, half)
+                    if o.net != link.net.code]
+            for net_code, other, _halo in settled[candidate]:
+                if net_code != link.net.code:
+                    here.extend(_path_obstacles(other, link.halo, net_code))
+            try:
+                found = _solve_lazily(
+                    (float(link.pad_a.x), float(link.pad_a.y)),
+                    (float(link.pad_b.x), float(link.pad_b.y)), here,
+                    boundary=boundary, boundary_gap=edge_gap)
+            except NoPathFound:
                 continue
+            if alternative is None or found.length < alternative.length:
+                alternative, alt_layer = found, candidate
+
+        if alternative is None and not legal:
+            link.elements = []
+            link.reason = "funnel geometry rejected and no fallback path on any layer"
+            checked["dropped"] += 1
+            continue
 
         if legal and (alternative is None or path.length <= alternative.length):
-            checked["funnelled"] += 1
+            checked["taut"] += 1
             settled[link.layer].append((link.net.code, path, link.halo))
             continue
 
         checked["fell_back"] += 1
+        link.layer = alt_layer
         link.elements = list(alternative.elements)
         settled[link.layer].append((link.net.code, alternative, link.halo))
 
