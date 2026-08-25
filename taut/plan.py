@@ -394,77 +394,6 @@ def _consistent(routes, raw: dict[tuple[int, int], list[int]]) -> dict[tuple[int
     return out
 
 
-def _bounds(points) -> tuple[float, float, float, float]:
-    xs = [x for x, _ in points]
-    ys = [y for _, y in points]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _apart(one, two, slack: float = 0.0) -> bool:
-    return (one[2] + slack < two[0] or two[2] + slack < one[0]
-            or one[3] + slack < two[1] or two[3] + slack < one[1])
-
-
-def _polylines_cross(first, second) -> bool:
-    if _apart(_bounds(first), _bounds(second)):
-        return False
-    for pa, pb in zip(first, first[1:]):
-        box = (min(pa[0], pb[0]), min(pa[1], pb[1]), max(pa[0], pb[0]), max(pa[1], pb[1]))
-        for qa, qb in zip(second, second[1:]):
-            other = (min(qa[0], qb[0]), min(qa[1], qb[1]),
-                     max(qa[0], qb[0]), max(qa[1], qb[1]))
-            if _apart(box, other):
-                continue
-            if _segments_cross(pa[0], pa[1], pb[0], pb[1], qa[0], qa[1], qb[0], qb[1]):
-                return True
-    return False
-
-
-def _crossing_pairs(routes, elements) -> set[tuple[int, int]]:
-    """Wires whose embedded paths actually cross each other.
-
-    Topology hands out corridors one connection at a time, and nothing in that makes the
-    result planar: two routes that share a single doorway can still be embedded crossing,
-    because which side of each other they pass on is decided by where they came from and
-    where they are going, not by the doorway. Two wires on one layer crossing is a short --
-    it is the whole of what is left to fix, and the check for it is worth its cost.
-    """
-    lines = {route.key: _flatten(route.start, route.goal, elements[route.key])
-             for route in routes if route.found and route.key in elements}
-    net_of = {route.key: route.net for route in routes}
-
-    out: set[tuple[int, int]] = set()
-    keys = sorted(lines)
-    for position, first in enumerate(keys):
-        for second in keys[position + 1:]:
-            if net_of[first] == net_of[second]:
-                continue
-            if _polylines_cross(lines[first], lines[second]):
-                out.add((first, second))
-    return out
-
-
-def _uncross(routes, order, pairs) -> dict[tuple[int, int], list[int]]:
-    """Swap crossing wires over, wherever they share a doorway.
-
-    Two wires cross because of the order they were given, so the order is where to fix it:
-    exchange them at every doorway they share and pull both taut again. What was a crossing
-    becomes two wires running side by side, and the pair that was hardest to place stops being
-    a special case.
-    """
-    shares = {route.key: set(route.portals) for route in routes if route.found}
-    swapped = {portal: list(seats) for portal, seats in order.items()}
-
-    for first, second in pairs:
-        for portal in shares.get(first, set()) & shares.get(second, set()):
-            seats = swapped.get(portal)
-            if not seats or first not in seats or second not in seats:
-                continue
-            here, there = seats.index(first), seats.index(second)
-            seats[here], seats[there] = seats[there], seats[here]
-    return swapped
-
-
 def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire]) -> list[Crossing]:
     """The doorways on one route, each carrying the full crossing order and this wire's rank."""
     out: list[Crossing] = []
@@ -772,13 +701,6 @@ def plan_board(board: Board, layers: list[str] | None = None,
                             route.start, route.goal,
                             _crossings_for(mesh, route, order, wires))
                         for route in routes if route.found}
-
-            # Crossings first: a wire on the wrong side of another is a short, and no amount
-            # of re-reading the order off geometry that already crosses will undo it.
-            tangled = _crossing_pairs(routes, elements)
-            if tangled:
-                order = _uncross(routes, order, tangled)
-                continue
 
             settled_order = _consistent(routes, _order_from_geometry(mesh, routes, elements))
             if settled_order == order:
