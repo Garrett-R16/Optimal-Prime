@@ -1,76 +1,107 @@
 # Topology-first rebuild — status
 
-**Not merged. `main` still runs the working router.** This branch now produces legal boards,
-but it does not yet beat the one on `main`, and the reason has been narrowed to one component.
+**Not merged. `main` still runs the working router.** This branch is now faster, shorter and
+cleaner than `main` on both boards, but it is one connection short on `sonde xilinx`, and
+connectivity is the metric that decides.
 
-## Where it stands
-
-`ecc83-pp`, two layers:
-
-| | connections | copper | DRC | time |
+| `ecc83-pp`, two layers | connections | copper | DRC | time |
 |---|---|---|---|---|
 | `main` (relax + rip-up) | 20 / 20 | 239.5 mm | 0 | 16 s |
-| this branch | 20 / 20 | 351.4 mm | 0 | 3.5 s |
+| this branch | 20 / 20 | **239.6 mm** | 0 | **2.0 s** |
 
-## The topology is nearly optimal. The embedding is not.
+| `sonde xilinx`, two layers | connections | copper | DRC | time |
+|---|---|---|---|---|
+| `main` | **66 / 66** | 718.4 mm | 0 | 324 s |
+| this branch | 65 / 66 | **697.3 mm** | 0 | **129 s** |
 
-This is the finding that matters, and it came from measuring the two halves separately.
+## The embedding is now the rubber-band equivalent
 
-Take the portal sequences this branch chooses and compute the true taut path through them —
-the shortest curve that stays inside those doorways. That is **251 mm**, against a
-sum-of-straight-lines floor of **237.5 mm**. The chosen homotopy classes are within **6%** of
-the best any router could do with them.
+The old embedding funnelled each wire through doorways it had been assigned a fixed slot in.
+That produced 2.6× the taut length of the channel it was given, and of 20 connections on
+`ecc83-pp` exactly **one** kept its funnelled path — the other 19 lost to a solver that ignores
+topology entirely, which meant the topological half of the router was doing no work.
 
-Now embed those same sequences with `taut/funnel.py`: **656 mm**. The embedding turns a 251 mm
-answer into a 656 mm one, and consequently loses nearly every comparison against the exact
-tangent solver — of 20 connections, **1** keeps its funnel path and 19 fall back.
+`taut/rubberband.py` replaces it with the construction from Leiserson & Maley, by way of
+Dayan's thesis and gEDA's `toporouter`. One idea carries it:
 
-So the part that was hard is working, and the part that was supposed to be a solved problem is
-where the defect is.
+> **A wire's position in a doorway is never stored. Only its rank is.**
 
-## What was found and fixed
+How far a wire must stand off a corner is recomputed *at every corner*, as the accumulated
+clearance of whatever lies between it and **that** corner:
 
-**A round pad was being modelled as a point.** `pad_obstacle(pad, 0, 0)` on a circular pad
-returns a single vertex at its centre with the copper radius carried in `r`, and `build_mesh`
-tested freeness with `distance_to_point(...) <= 0`, which ignores `r`. With 28 of 33 cores
-being such discs, the mesh triangulated straight through copper: 31 of 88 "free" triangles
-contained solid copper, 74 of 120 portals had their span buried in a pad, 65 of 174 gate
-endpoints landed inside copper (worst 1.97 mm deep), and 30 of 55 wrap arcs were short by
-exactly the pad's own radius. Freeness, portal span, capacity, gate offsets and wrap radii now
-all measure from the copper boundary.
+```
+r = spacing(me, next) + spacing(next, next-next) + ... + spacing(last, the corner)
+```
 
-**Gate orientation used pad centres at the first and last portal.** A pad centre is inside its
-own pad, far enough off the true crossing direction to flip left for right on 4 of 87 gates.
-Both ends now come from triangle centroids.
+The same wire, in the same bundle, therefore stands a different distance off at each corner it
+touches, because the set of wires between it and each corner is different. Fixed slots cannot
+express that, which is exactly why a bundle seated that way spread correctly in one gap and
+wasted half of the next.
 
-**Funnelled geometry was never checked against the board outline.** Only the fallback solver
-was given the boundary, so a route along the rim could leave the board and be pronounced legal.
+The path is found by recursion on the largest violation rather than by sweeping forward: draw
+the chord, find the obstacle it is most wrong about, wrap it, recurse on both halves. Being on
+the *wrong side* of an obstacle is measured on a deliberately different scale from merely
+passing too close, so gross errors are always corrected first.
 
-**A* costed triangles rather than doorways.** The search state is now *(triangle, portal it was
-entered by)* and a step is measured between consecutive portal midpoints, which is what an
-embedded track actually traverses. Measured on channel length alone: **−12%**.
+The tangent geometry is written in vectors rather than the original's slope-intercept form,
+which removes its degenerate cases. It reproduces the analytic single-obstacle length to 1e-6
+and every bitangent to 1e-15.
 
-**A legal funnel path was kept even when it wandered.** Any path that cleared obstacles was
-accepted, at up to 1.8× its own span — so a *better* channel could make the board worse by
-producing a merely-adequate path where the previous one had been rejected outright. A path
-longer than 1.25× its span now competes with the exact solver and the shorter wins.
+Result on `ecc83-pp`: kept taut paths went **1/20 → 15/20**, and the embedded length is now
+**239.5 mm against a straight-line floor of 237.5 mm — 1.008×**.
+
+## What the correct embedding then exposed
+
+With the embedding no longer the bottleneck, the measurement moved, and it overturned what
+this document previously claimed. The topology was **not** within 6% of optimal. It was 2.58×.
+
+**A terminal could not leave its own pad in the right direction.** A pad centre lies inside its
+own pad, so no free triangle contains it, and `triangle_at` was resolving it to the free
+triangle with the nearest *centroid* — routinely one on the far side of the pad. Routes set off
+in the wrong direction and came back around their own pad before they could start.
+
+Measured as portal-midpoint chain against the straight-line floor on `ecc83-pp`:
+
+| | midpoint chain | vs floor | worst single detour |
+|---|---|---|---|
+| before | 611.8 mm | 2.58× | 16.3 mm |
+| after | 260.1 mm | **1.10×** | 6.5 mm |
+
+on a board 25 mm across. It also accounts for **all 52** connections topology could not route
+on `sonde xilinx`, and for that board's 3 clearance violations. Topology now converges in **one
+round** on both boards with zero over-capacity doorways and nothing unroutable.
+
+This was worth the detour: the defect was invisible while the embedding was wrong, because
+every route was being thrown away and re-solved anyway.
+
+## Rip-up
+
+A connection that ends up with no legal geometry is not evidence that the board is full —
+topology gave every connection a corridor. It is evidence that a track laid earlier took more
+room than its own corridor. The check phase now asks a stranded connection where it would go on
+an empty board, takes up only the tracks sitting on that answer, places it, and puts them back
+elsewhere; a displaced track may displace one itself, three deep. If any of them cannot be put
+back, the whole exchange is undone rather than trading one unrouted connection for another.
+
+That took `sonde xilinx` from 63/66 to 65/66.
 
 ## What is left
 
-One thing, precisely located: **`taut/funnel.py` produces ~2.6× the taut length of the channel
-it is given.** Both halves are correct in isolation — `taut_through` reproduces the analytic
-single-obstacle length to 1e-6, and `funnel` returns the near side of an offset doorway — so
-the defect is in how the wrap sequence and the tangent construction meet. The likeliest
-suspect is `_outer_tangent` returning `None` for overlapping or same-obstacle wrap circles and
-falling back to the line of centres, which runs straight through the obstacle.
+**One connection on `sonde xilinx`.** `main` places it, using five minutes of relaxation and
+rip-up. Until the branch matches 66/66 it should not be merged, however much better the rest of
+the numbers are.
 
-There is also a hole in the verification: on one intermediate build, two *already settled*
-paths overlapped each other, which the pairwise check should have caught.
+**25 of 66 taut paths on `sonde xilinx` still collide with something** and fall back to the
+exact solver. Since ranks are enforced at the doorways and taut wires cannot cross between
+them, this points at the crossing order rather than the geometry: it is seeded from straight
+chords and then re-read off the embedded result a few times, which settles but is not
+guaranteed to. Making the order consistent by construction is the next real piece of work, and
+it is the same lever that would let the fallback — and most of the remaining 129 s — go away.
 
 ## Why this is still the right direction
 
-`main` reaches 100% connectivity and zero DRC, but by relaxation plus rip-up: nothing bounds
-quality, it takes five minutes on a 66-connection board, and it finds contention by collision.
-This branch decides contention before any geometry exists, converges in one to three rounds
-with zero over-capacity portals, and picks channels within 6% of optimal. Finish the embedding
-and it wins on both counts.
+`main` reaches 100% connectivity, but by relaxation plus rip-up: nothing bounds quality, and it
+finds contention by collision. This branch decides contention before any geometry exists,
+converges in one round, and produces 3% less copper on `sonde xilinx` in 40% of the time — with
+an embedding that is provably the shortest curve through the corridor it is given, rather than
+one that merely passes DRC.

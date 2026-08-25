@@ -58,6 +58,9 @@ _SEATING_PASSES = 4
 #: How many settled tracks rip-up will move to make room for one that has nowhere to go.
 _RIPUP_LIMIT = 4
 
+#: How far the displacement may cascade -- a track moved out of the way may move one itself.
+_RIPUP_DEPTH = 3
+
 
 # --------------------------------------------------------------------------- outline
 
@@ -684,8 +687,82 @@ def plan_board(board: Board, layers: list[str] | None = None,
         link.elements = []
         how.pop(link.key, None)
 
+    def restore(state) -> None:
+        rows, records, places = state
+        for name in usable:
+            settled[name] = list(rows[name])
+        how.clear()
+        how.update(records)
+        for key, (layer, elements) in places.items():
+            by_key[key].layer = layer
+            by_key[key].elements = list(elements)
+
+    def snapshot():
+        return ({name: list(rows) for name, rows in settled.items()},
+                dict(how),
+                {link.key: (link.layer, list(link.elements)) for link in links})
+
+    def place(link: _Link, protected: frozenset[int], depth: int) -> bool:
+        """Put one connection down, taking up what is in the way if it has to.
+
+        Topology allocated a corridor to every connection before any geometry existed, so a
+        connection with nowhere to go is not evidence that the board is full -- it is
+        evidence that a track laid earlier took more room than its own corridor and sat down
+        on someone else's. Ask where this one would go on an empty board, take up only the
+        tracks actually sitting on that answer, and put them back somewhere else. If any of
+        them cannot be put back, undo the whole exchange rather than trade one unrouted
+        connection for another.
+        """
+        outcome = attempt(link, frozenset())
+        if outcome is not None:
+            lay(link, outcome)
+            return True
+        if depth >= _RIPUP_DEPTH:
+            link.reason = "no legal geometry, and rip-up has gone as deep as it will go"
+            return False
+
+        everything = frozenset(placed.key for rows in settled.values() for placed in rows)
+        alone = attempt(link, everything)
+        if alone is None:
+            link.reason = "no geometry between these pads even on an empty board"
+            return False
+
+        path, layer, _kind = alone
+        culprits = [placed for placed in settled[layer]
+                    if placed.net != link.net.code and placed.key not in protected
+                    and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
+                                                                 placed.net))]
+        blocked = [placed for placed in settled[layer]
+                   if placed.key in protected and placed.net != link.net.code
+                   and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
+                                                                placed.net))]
+        if blocked or not culprits or len(culprits) > _RIPUP_LIMIT:
+            link.reason = ("blocked by a track this exchange is not allowed to move" if blocked
+                           else f"blocked by {len(culprits)} settled tracks, more than rip-up "
+                                f"will move" if culprits else "blocked by static copper")
+            return False
+
+        outcome = attempt(link, frozenset(placed.key for placed in culprits))
+        if outcome is None:
+            link.reason = "no legal geometry even with the tracks in the way taken up"
+            return False
+
+        undo = snapshot()
+        displaced = [by_key[placed.key] for placed in culprits if placed.key in by_key]
+        for other in displaced:
+            take_up(other)
+        lay(link, outcome)
+
+        keep = protected | {link.key}
+        for other in displaced:
+            if not place(other, keep, depth + 1):
+                restore(undo)
+                link.elements = []
+                link.reason = "rip-up would have stranded a track that was already placed"
+                return False
+        return True
+
     stranded: list[_Link] = []
-    rescued_links: list[_Link] = []
     for link in sorted(links, key=lambda l: -l.span):
         if link.layer is None:
             continue
@@ -695,67 +772,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
             continue
         lay(link, outcome)
 
-    # ---- rip up what is in the way of a connection with nowhere to go ----------------
-    #
-    # Topology allocated a corridor for every connection, so a connection with no legal
-    # geometry is not evidence that the board is full -- it is evidence that a track laid
-    # earlier took more room than its own corridor. Ask where this one would go on an empty
-    # board, take up only the tracks actually sitting on that answer, place it, and put them
-    # back somewhere else.
+    # A connection with nowhere to go gets a second chance, this time allowed to move what
+    # is in its way. Held back to a second pass so the common case never pays for it.
+    rescued_links: list[_Link] = []
     for link in list(stranded):
-        everything = frozenset(placed.key for layer in usable for placed in settled[layer])
-        alone = attempt(link, everything)
-        if alone is None:
-            link.reason = "no geometry between these pads even on an empty board"
-            continue
-
-        path, layer, _kind = alone
-        culprits = [placed for placed in settled[layer]
-                    if placed.net != link.net.code
-                    and violated_obstacles(path, _path_obstacles(placed.path, link.halo,
-                                                                 placed.net))]
-        if not culprits or len(culprits) > _RIPUP_LIMIT:
-            link.reason = (f"blocked by {len(culprits)} settled tracks, more than rip-up "
-                           f"will move" if culprits else "blocked by static copper")
-            continue
-
-        keys = frozenset(placed.key for placed in culprits)
-        outcome = attempt(link, keys)
-        if outcome is None:
-            link.reason = "no legal geometry even with the tracks in the way taken up"
-            continue
-
-        snapshot = {name: list(rows) for name, rows in settled.items()}
-        displaced = [by_key[placed.key] for placed in culprits if placed.key in by_key]
-        for other in displaced:
-            take_up(other)
-        lay(link, outcome)
-
-        replaced = []
-        for other in displaced:
-            again = attempt(other, frozenset())
-            if again is None:
-                break
-            lay(other, again)
-            replaced.append(other)
-        else:
+        if place(link, frozenset(), 0):
             stranded.remove(link)
             rescued_links.append(link)
-            continue
-
-        # One of the displaced tracks could not be put back. Undo the whole exchange rather
-        # than trade one unrouted connection for another.
-        for name, rows in snapshot.items():
-            settled[name] = rows
-        for other in displaced:
-            for name, rows in snapshot.items():
-                for placed in rows:
-                    if placed.key == other.key:
-                        other.layer = name
-                        other.elements = list(placed.path.elements)
-                        how[other.key] = "fell_back"
-        link.elements = []
-        link.reason = "rip-up would have stranded a track that was already placed"
 
     checked["taut"] = sum(1 for kind in how.values() if kind == "taut")
     checked["fell_back"] = sum(1 for kind in how.values() if kind == "fell_back")
