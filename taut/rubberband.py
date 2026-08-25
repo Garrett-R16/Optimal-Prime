@@ -81,6 +81,12 @@ class Crossing:
     by: float
     order: tuple[Wire, ...]
     mine: int
+    #: How much of the doorway the wires either side of this one have left it, once they have
+    #: been pushed apart far enough to clear each other. Set from real geometry and re-set
+    #: every pass; ``None`` before there is any geometry to read, when the rank stack below
+    #: stands in for it.
+    room_a: float | None = None
+    room_b: float | None = None
     #: copper radius carried by each end, for a shape the mesh describes by its centre
     ra: float = 0.0
     rb: float = 0.0
@@ -97,6 +103,10 @@ class Crossing:
         wire's own clearance from the obstacle. Walking the other way yields the complementary
         sum and a radius that is wrong by the width of the rest of the bundle.
         """
+        given = self.room_a if toward_a else self.room_b
+        if given is not None:
+            return given
+
         skin = self.ra if toward_a else self.rb
         if self.constraint:
             # A doorway that is itself a piece of copper -- a pad edge, the board rim. The
@@ -233,7 +243,23 @@ def _arc_to_arc(a: Arc, b: Arc):
             (b.cx + b.r * math.cos(opposite), b.cy + b.r * math.sin(opposite)))
 
 
-def _wrong_side(vx, vy, other, x0, y0, x1, y1, required, before, after):
+def _neighbours(crossings, index, start, goal, reach: int = 3):
+    """The path either side of a doorway, at increasing distance from it.
+
+    The last test below asks whether the path really does pass around an obstacle, by asking
+    whether what comes before and what comes after lie on opposite sides of it. Immediate
+    neighbours are often both on the same side simply because they are close to each other, so
+    the question is put again further out before it is answered no.
+    """
+    out = []
+    for step in range(1, reach + 1):
+        before = crossings[index - step].point() if index - step >= 0 else start
+        after = crossings[index + step].point() if index + step < len(crossings) else goal
+        out.append((before, after))
+    return out
+
+
+def _wrong_side(vx, vy, other, x0, y0, x1, y1, required, pairs):
     """How wrong the chord is about an obstacle it passes clean to one side of.
 
     Two things have to be true before this counts. The obstacle must lie *between* the chord
@@ -265,9 +291,12 @@ def _wrong_side(vx, vy, other, x0, y0, x1, y1, required, before, after):
         return None
     ux, uy = (vx - foot[0]) / gap, (vy - foot[1]) / gap
     tip = (foot[0] + ux * (required + gap), foot[1] + uy * (required + gap))
-    ahead = _wind(foot[0], foot[1], tip[0], tip[1], before[0], before[1])
-    behind = _wind(foot[0], foot[1], tip[0], tip[1], after[0], after[1])
-    if ahead != 0.0 and behind != 0.0 and (ahead > 0) == (behind > 0):
+    for before, after in pairs:
+        ahead = _wind(foot[0], foot[1], tip[0], tip[1], before[0], before[1])
+        behind = _wind(foot[0], foot[1], tip[0], tip[1], after[0], after[1])
+        if ahead == 0.0 or behind == 0.0 or (ahead > 0) != (behind > 0):
+            break
+    else:
         return None
 
     return gap + required
@@ -352,7 +381,8 @@ def _candidates(crossings: list[Crossing], lo: int, hi: int,
                     continue
                 violation = required - actual
             else:
-                measure = _wrong_side(vx, vy, other, x0, y0, x1, y1, required, before, after)
+                measure = _wrong_side(vx, vy, other, x0, y0, x1, y1, required,
+                                      _neighbours(crossings, index, start, goal))
                 if measure is None:
                     continue
                 violation = measure

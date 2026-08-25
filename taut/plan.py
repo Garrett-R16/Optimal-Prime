@@ -35,6 +35,7 @@ from .board import Board, Net, Pad
 from .funnel import Curve, Gate, Line, funnel, orient, taut_through
 from .rubberband import Arc as RbArc, Crossing, Segment as RbSegment
 from .rubberband import Wire as RbWire, _segments_cross, rubberband, to_geometry
+from .rubberband import spacing_between
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
 from .route import (ArcTrack, RouteResult, Track, _board_boundary, _convex_hull,
@@ -394,7 +395,96 @@ def _consistent(routes, raw: dict[tuple[int, int], list[int]]) -> dict[tuple[int
     return out
 
 
-def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire]) -> list[Crossing]:
+def _push_apart(places: list[float], gaps: list[float], low: float, high: float) -> list[float]:
+    """Slide wires along a doorway until each clears the next, moving them as little as possible.
+
+    A forward pass takes each wire out far enough to clear the one before it, a backward pass
+    brings the far end back inside the doorway, and a wire that was already clear is not moved
+    at all. That is what makes this different from handing every wire a slot up front: a
+    doorway with room to spare leaves its wires exactly where being taut put them, and only a
+    crowded one pushes.
+    """
+    out = list(places)
+    out[0] = max(out[0], low)
+    for index in range(1, len(out)):
+        out[index] = max(out[index], out[index - 1] + gaps[index - 1])
+
+    out[-1] = min(out[-1], high)
+    for index in range(len(out) - 2, -1, -1):
+        out[index] = min(out[index], out[index + 1] - gaps[index])
+    return out
+
+
+def _bundle(mesh: Mesh, routes, elements, wires: dict[int, RbWire]) -> dict:
+    """Where every wire sits in every doorway, once the bundle has settled against itself.
+
+    Ranking wires across a doorway keeps them in order but says nothing about the gap between
+    them, and the offset each one keeps is only ever expressed where it wraps a corner. Two
+    wires running side by side through open channel wrap nothing, so nothing holds them apart
+    -- which is how taut paths that were each in the right corridor still ended up touching.
+
+    Reading where they actually cross, pushing them apart along the doorway, and pulling every
+    wire taut again against those positions is the bands doing to each other what the obstacles
+    already do to them.
+    """
+    seats: dict[tuple[int, int], list[tuple[float, int]]] = {}
+    for route in routes:
+        if not route.found or route.key not in elements:
+            continue
+        polyline = _flatten(route.start, route.goal, elements[route.key])
+        cursor = 0
+        for key in route.portals:
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            ax, ay = float(pa[0]), float(pa[1])
+            dx, dy = float(pb[0]) - ax, float(pb[1]) - ay
+            span = math.hypot(dx, dy)
+            where, cursor = _meets(polyline, cursor, ax, ay, dx, dy)
+            seats.setdefault(key, []).append((max(0.0, min(span, where * span)), route.key))
+
+    room: dict[tuple[int, int, int], tuple[float, float]] = {}
+    for key, found in seats.items():
+        found.sort()
+        span = mesh.portals[key].length
+        holders = [wires[route_key] for _, route_key in found]
+        gaps = [spacing_between(a, b) for a, b in zip(holders, holders[1:])]
+
+        first, last = holders[0], holders[-1]
+        low = float(mesh.radius[key[0]]) + first.half_width + first.clearance
+        high = span - float(mesh.radius[key[1]]) - last.half_width - last.clearance
+
+        settled = _push_apart([place for place, _ in found], gaps, low, high)
+        for index, (_, route_key) in enumerate(found):
+            behind = settled[index - 1] + gaps[index - 1] if index else low
+            ahead = (settled[index + 1] - gaps[index] if index + 1 < len(settled) else high)
+            room[(key[0], key[1], route_key)] = (max(low, behind), span - min(high, ahead))
+    return room
+
+
+def _meets(polyline, cursor: int, ax: float, ay: float,
+           dx: float, dy: float) -> tuple[float, int]:
+    """Where a path crosses a doorway, as a fraction along it, and where to resume looking."""
+    for step in range(cursor, len(polyline) - 1):
+        (px, py), (qx, qy) = polyline[step], polyline[step + 1]
+        ex, ey = qx - px, qy - py
+        denominator = dx * ey - dy * ex
+        if abs(denominator) < 1e-12:
+            continue
+        along = ((px - ax) * ey - (py - ay) * ex) / denominator
+        across = ((px - ax) * dy - (py - ay) * dx) / denominator
+        if 0.0 <= along <= 1.0 and 0.0 <= across <= 1.0:
+            return along, step
+
+    span = dx * dx + dy * dy
+    nearest = min(range(len(polyline)),
+                  key=lambda step: (polyline[step][0] - ax - dx / 2) ** 2
+                  + (polyline[step][1] - ay - dy / 2) ** 2)
+    px, py = polyline[nearest]
+    where = (((px - ax) * dx + (py - ay) * dy) / span) if span > 1e-12 else 0.5
+    return min(1.0, max(0.0, where)), cursor
+
+
+def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire],
+                   room: dict | None = None) -> list[Crossing]:
     """The doorways on one route, each carrying the full crossing order and this wire's rank."""
     out: list[Crossing] = []
     for key in route.portals:
@@ -402,10 +492,12 @@ def _crossings_for(mesh: Mesh, route, order, wires: dict[int, RbWire]) -> list[C
         if route.key not in holders:
             holders = list(holders) + [route.key]
         pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+        given = (room or {}).get((key[0], key[1], route.key), (None, None))
         out.append(Crossing(
             ax=float(pa[0]), ay=float(pa[1]), bx=float(pb[0]), by=float(pb[1]),
             order=tuple(wires[k] for k in holders), mine=holders.index(route.key),
             ra=float(mesh.radius[key[0]]), rb=float(mesh.radius[key[1]]),
+            room_a=given[0], room_b=given[1],
         ))
     return out
 
@@ -696,11 +788,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
         # from straight chords; two or three passes is enough for it to stop changing.
         index = {link.key: link for link in group}
         elements: dict[int, list] = {}
+        room: dict = {}
         for _pass in range(_SEATING_PASSES):
             elements = {route.key: _rubberband_elements(
                             route.start, route.goal,
-                            _crossings_for(mesh, route, order, wires))
+                            _crossings_for(mesh, route, order, wires, room))
                         for route in routes if route.found}
+            room = _bundle(mesh, routes, elements, wires)
 
             settled_order = _consistent(routes, _order_from_geometry(mesh, routes, elements))
             if settled_order == order:
