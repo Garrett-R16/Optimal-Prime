@@ -98,6 +98,57 @@ def _midpoint(mesh: Mesh, key: tuple[int, int]) -> tuple[float, float]:
     return float((a[0] + b[0]) / 2), float((a[1] + b[1]) / 2)
 
 
+def _direct_walk(mesh: Mesh, layer: int, start, goal, home: int):
+    """The straight line between two terminals, told as the doorways it actually crosses.
+
+    A shortcut that reports no doorways is invisible: it holds no rank in any crossing
+    order, consumes no capacity, and cannot be seated against the wires it passes among --
+    which is how straight legs ended up crossing other wires with nothing anywhere
+    recording the conflict. The line stays a line; what changes is that every doorway it
+    passes through is on the record, so everything downstream treats it like any other
+    wire.
+    """
+    ax, ay = start
+    bx, by = goal
+    dx, dy = bx - ax, by - ay
+
+    crossed: list[tuple[float, tuple[int, int]]] = []
+    for key, portal in mesh.portals.items():
+        pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+        px, py = float(pa[0]), float(pa[1])
+        ex, ey = float(pb[0]) - px, float(pb[1]) - py
+        denominator = dx * ey - dy * ex
+        if abs(denominator) < 1e-12:
+            continue
+        t = ((px - ax) * ey - (py - ay) * ex) / denominator
+        u = ((px - ax) * dy - (py - ay) * dx) / denominator
+        if 0.0 < t < 1.0 and 0.0 < u < 1.0:
+            crossed.append((t, key))
+    crossed.sort()
+
+    if not crossed:
+        return (layer, home), [(layer, home, ("d",))]
+
+    # The triangle after each crossing, read from the line itself: the point midway to the
+    # next crossing is inside it.
+    stations = [t for t, _ in crossed] + [1.0]
+    walk = []
+    previous = None
+    for index, (t, key) in enumerate(crossed):
+        middle = (t + stations[index + 1]) / 2.0
+        tri = mesh._locate(ax + dx * middle, ay + dy * middle)
+        if tri < 0 or not mesh.free[tri]:
+            tri = previous if previous is not None else home
+        walk.append((layer, int(tri), ("p", key)))
+        previous = int(tri)
+
+    first_middle = stations[0] / 2.0
+    origin = mesh._locate(ax + dx * first_middle, ay + dy * first_middle)
+    if origin < 0 or not mesh.free[origin]:
+        origin = home
+    return (layer, int(origin)), walk
+
+
 def _crosses_avoid(avoid, layer: int, ax: float, ay: float, bx: float, by: float) -> bool:
     """Would a step from a to b on this layer cross any committed wire it must respect?"""
     lo_x, hi_x = (ax, bx) if ax <= bx else (bx, ax)
@@ -130,10 +181,18 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
     order = ([prefer] if prefer is not None else []) + [
         index for index in range(len(meshes)) if index != prefer]
     for layer in order:
+        if (net, layer, -1, frozenset()) in bans:
+            # The straight line is clear of copper but crosses another wire; this net has
+            # to route properly on this layer, doorway by doorway.
+            continue
         together = set(start_tris[layer]) & set(goal_tris[layer])
         if (together and meshes[layer].clear_between(start, goal)
                 and not _crosses_avoid(avoid, layer, start[0], start[1],
                                        goal[0], goal[1])):
+            # Measured both ways: telling the straight leg its crossed doorways bends it
+            # into the rank stacks at every portal it touches -- +3.3 mm on ecc83-pp and a
+            # short on sonde xilinx -- so the shortcut stays a shortcut, and crossings that
+            # involve one are settled by the check phase instead.
             home = next(iter(together))
             return (layer, home), [(layer, home, ("d",))]
 

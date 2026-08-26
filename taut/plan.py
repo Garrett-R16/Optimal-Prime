@@ -54,7 +54,7 @@ __all__ = ["plan_board"]
 #: A funnel path no longer than this multiple of its straight-line span is kept without
 #: consulting the exact solver. Above it, both are computed and the shorter wins -- the check
 #: is cheap next to a wasted millimetre of copper and the space it denies everything after it.
-_KEEP_WITHOUT_ASKING = 1.25
+_KEEP_WITHOUT_ASKING = 1.0
 
 #: How many times to re-read the crossing order off the geometry and embed again.
 _SEATING_PASSES = 8
@@ -1170,6 +1170,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             for first, second, points in lenses:
                 clips.append(_lens_wrap(pieces, first, second, points))
 
+
             if not clips:
                 break
             for key, extra in clips:
@@ -1391,23 +1392,54 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 return False
         return True
 
-    stranded: list[_Link] = []
-    for link in sorted(links, key=lambda l: -l.span):
-        if link.layer is None:
-            continue
-        outcome = attempt(link, frozenset())
-        if outcome is None:
-            stranded.append(link)
-            continue
-        lay(link, outcome)
+    #: the embedding's own geometry, kept aside so a second attempt at placing the board
+    #: starts from the taut answers rather than from whatever the first attempt left behind
+    taut_of = {link.key: list(link.elements) for link in links}
+    taut_layer = {link.key: link.layer for link in links}
 
-    # A connection with nowhere to go gets a second chance, this time allowed to move what
-    # is in its way. Held back to a second pass so the common case never pays for it.
-    rescued_links: list[_Link] = []
-    for link in list(stranded):
-        if place(link, frozenset(), 0):
-            stranded.remove(link)
-            rescued_links.append(link)
+    def run_placement(sequence, rescue: bool = True) -> tuple[list["_Link"], list["_Link"]]:
+        for layer in usable:
+            settled[layer] = []
+        how.clear()
+        for link in links:
+            link.elements = list(taut_of[link.key])
+            link.layer = taut_layer[link.key]
+            link.reason = ""
+
+        missed: list[_Link] = []
+        for link in sequence:
+            if link.layer is None:
+                continue
+            outcome = attempt(link, frozenset())
+            if outcome is None:
+                missed.append(link)
+                continue
+            lay(link, outcome)
+
+        saved: list[_Link] = []
+        if rescue:
+            for link in list(missed):
+                if place(link, frozenset(), 0):
+                    missed.remove(link)
+                    saved.append(link)
+        return missed, saved
+
+    # Shortest first: a short connection bent around a long one costs almost nothing, a
+    # long one bent around dozens of short ones costs a lot -- measured, 77 mm of it. But
+    # short-first can wall a long connection in completely, so if anything is left
+    # stranded the whole placement is redone longest-first, which completes; the shorter
+    # board is only the better board when it is a whole one.
+    # The first pass carries no rescue: rip-up is the expensive tool, and spending minutes
+    # of it inside an ordering that is about to be abandoned buys nothing. Whoever
+    # short-first strands is not evidence against the order, only against their own place in
+    # it -- so the second try seats exactly them first, longest leading, and everyone else
+    # still shortest-first. Only if that also strands someone does the placement fall back
+    # to longest-first throughout, which completes.
+    ordered = sorted((link for link in links if link.layer is not None),
+                     key=lambda l: l.span)
+    stranded, rescued_links = run_placement(ordered, rescue=False)
+    if stranded:
+        stranded, rescued_links = run_placement(list(reversed(ordered)))
 
     # A connection that could not be placed keeps the geometry the embedding gave it, and the
     # emitter below writes whatever a link is holding. Nothing had cleared it, so a connection
