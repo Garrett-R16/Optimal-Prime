@@ -122,3 +122,20 @@ def test_a_doorway_never_asks_for_more_room_than_it_has():
     crossing = Crossing(ax=0.0, ay=0.0, bx=0.0, by=4.0, order=wires, mine=0)
     assert crossing.offset_from(False) <= 4.0
     assert crossing.point()[1] <= 4.0
+
+
+def test_an_extra_wrap_point_pushes_the_chord_off():
+    """Copper with no doorway vertex still gets avoided once it is named."""
+    start, goal = (0.0, 0.0), (100.0, 0.0)
+    bare = to_geometry(start, goal, rubberband(start, goal, []))
+    assert len(bare) == 1  # straight through
+
+    pushed = rubberband(start, goal, [], extras=((50.0, 0.5, 5.0),))
+    geo = to_geometry(start, goal, pushed)
+    assert len(pushed) == 1
+    assert pushed[0].r == pytest.approx(5.0)
+    total = sum(piece.length for piece in geo)
+    assert total > 100.0
+    # and the arc keeps the required distance from the named point
+    arc = pushed[0]
+    assert math.hypot(arc.cx - 50.0, arc.cy - 0.5) < 1e-9

@@ -318,43 +318,46 @@ def _gates_for(mesh: Mesh, route: Route, slot_of, clearance: float, width: float
 
 
 def _crossing_order(mesh: Mesh, routes) -> dict[tuple[int, int], list[int]]:
-    """Put the routes sharing each doorway into an order across it.
+    """Put the routes sharing each doorway into an order across it -- from the topology.
 
-    Only the order is kept. Where a wire actually sits is never recorded, because it is not a
-    property of the wire: the distance it stands off a corner is the accumulated width of
-    whatever lies between it and *that* corner, and that differs at every corner it passes.
-    Seating wires at fixed positions instead -- an equal share of each doorway, decided once --
-    is what made a bundle spread correctly in one gap and waste half of the next.
-
-    The order itself comes from where each route's local chord crosses the doorway, which is a
-    good enough guess to start from and, being an order rather than a position, survives the
-    embedding changing every coordinate underneath it.
+    The order used to be read off the embedded geometry and re-read after every pass. That
+    is circular: when two wires cross, the geometry is exactly the thing that is wrong, and
+    an order read from it re-embeds the crossing it should be fixing. Rank is a topological
+    fact, so it is derived from the topology: each route's *chain* -- terminal, doorway
+    midpoints, terminal -- crosses every one of its doorways at the midpoint, and the order
+    of wires across a doorway is the order of where their chains come from and go to,
+    projected on the doorway. The geometry then follows the rank, never the reverse.
     """
-    seats: dict[tuple[int, int], list[tuple[float, int]]] = {}
-
+    chains: dict[int, list[tuple[float, float]]] = {}
     for route in routes:
         if not route.found:
             continue
         points = [route.start]
         for key in route.portals:
             pa, pb = mesh.points[key[0]], mesh.points[key[1]]
-            points.append(((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0))
+            points.append(((float(pa[0]) + float(pb[0])) / 2.0,
+                           (float(pa[1]) + float(pb[1])) / 2.0))
         points.append(route.goal)
+        chains[route.key] = points
 
+    seats: dict[tuple[int, int], list[tuple[float, int]]] = {}
+    for route in routes:
+        if not route.found:
+            continue
+        chain = chains[route.key]
         for index, key in enumerate(route.portals):
             pa, pb = mesh.points[key[0]], mesh.points[key[1]]
-            dx, dy = float(pb[0] - pa[0]), float(pb[1] - pa[1])
-            before, after = points[index], points[index + 2]
-            ex, ey = after[0] - before[0], after[1] - before[1]
-            denominator = dx * ey - dy * ex
-            if abs(denominator) < 1e-9:
-                mid = ((before[0] + after[0]) / 2.0, (before[1] + after[1]) / 2.0)
-                span = dx * dx + dy * dy
-                where = (((mid[0] - pa[0]) * dx + (mid[1] - pa[1]) * dy) / span
-                         if span > 1e-9 else 0.5)
-            else:
-                where = ((before[0] - pa[0]) * ey - (before[1] - pa[1]) * ex) / denominator
-            seats.setdefault(key, []).append((min(1.0, max(0.0, where)), route.key))
+            ax, ay = float(pa[0]), float(pa[1])
+            dx, dy = float(pb[0]) - ax, float(pb[1]) - ay
+            span = dx * dx + dy * dy
+            if span < 1e-12:
+                seats.setdefault(key, []).append((0.5, route.key))
+                continue
+            before = chain[index]
+            after = chain[index + 2]
+            here = (((before[0] + after[0]) / 2.0 - ax) * dx
+                    + ((before[1] + after[1]) / 2.0 - ay) * dy) / span
+            seats.setdefault(key, []).append((here, route.key))
 
     return {key: [route_key for _, route_key in sorted(value)]
             for key, value in seats.items()}
@@ -610,10 +613,10 @@ def _order_from_geometry(mesh: Mesh, routes, elements) -> dict[tuple[int, int], 
             for key, value in seats.items()}
 
 
-def _rubberband_elements(start, goal, crossings) -> list:
+def _rubberband_elements(start, goal, crossings, extras=()) -> list:
     """Pull one wire taut and hand back pieces the checker and emitter already understand."""
     out = []
-    for piece in to_geometry(start, goal, rubberband(start, goal, crossings)):
+    for piece in to_geometry(start, goal, rubberband(start, goal, crossings, extras)):
         if isinstance(piece, RbSegment):
             out.append(Line(piece.x1, piece.y1, piece.x2, piece.y2))
         else:
@@ -703,6 +706,281 @@ def _elements_to_tracks(elements, net: int, layer: str, width_nm: int) -> list:
                                 x2=int(round(ex)), y2=int(round(ey)),
                                 width_nm=width_nm, length_nm=element.length))
     return out
+
+
+#: How many route-embed-check-learn rounds before accepting what stands. Each round only
+#: adds bans, so the loop is monotone; this is a backstop, not a working limit.
+_SKETCH_ROUNDS = 8
+
+#: How many times to re-pull the wires with newly named wrap points before looking at
+#: crossings. Clips converge like the exact solver's lazy obstacle loop: fast.
+_CLIP_ROUNDS = 4
+
+_TAIL_FAMILIES = True
+
+
+def _embed_group(mesh: Mesh, group: list["_Link"], extras: dict) -> None:
+    """Pull one layer's wires taut together, seating them against each other by rank."""
+    if not group:
+        return
+    routes = [_as_route(link) for link in group]
+    order = _consistent(routes, _crossing_order(mesh, routes))
+    wires = {link.key: RbWire(key=link.key, net=link.net.code,
+                              half_width=link.width / 2.0,
+                              clearance=link.clearance + GUARDBAND_NM)
+             for link in group}
+
+    # Rank comes from the topology and stays put; the passes are only for the *room* --
+    # where each wire actually sits inside its doorways once the whole bundle has pressed
+    # against itself, which is geometric and needs a fixpoint.
+    index = {link.key: link for link in group}
+    elements: dict[int, list] = {}
+    room: dict = {}
+    for _pass in range(_SEATING_PASSES):
+        elements = {route.key: _rubberband_elements(
+                        route.start, route.goal,
+                        _crossings_for(mesh, route, order, wires, room),
+                        tuple(extras.get(route.key, ())))
+                    for route in routes if route.found}
+        room = _bundle(mesh, routes, elements, wires)
+
+    for route in routes:
+        link = index[route.key]
+        if not route.found:
+            link.reason = "no route through the free space"
+            continue
+        link.elements = elements.get(route.key, [])
+
+
+def _check_pieces(board: Board, meshes: dict, usable, pieces: list["_Link"],
+                  placed_vias) -> tuple[list, list]:
+    """Referee the pure sketch: every wire against every wire and all bare copper.
+
+    Returns crossings as ``(key_a, key_b, x, y)`` and clips as ``(key, (x, y, required))``
+    -- each clip already shaped as the extra wrap point that repairs it, centred on the
+    copper boundary nearest the offence.
+    """
+    from .sketch import SketchWire, check_sketch
+
+    crossings: list = []
+    clips: list = []
+    for layer in usable:
+        group = [link for link in pieces if link.layer == layer and link.elements]
+        if not group:
+            continue
+        wires = [SketchWire(key=link.key, net=link.net.code,
+                            path=_as_path(link.elements),
+                            half_width=link.width / 2.0, clearance=link.clearance)
+                 for link in group]
+        statics = [pad_obstacle(pad, 0.0, 0.0) for pad in board.pads
+                   if pad.on_layer(layer)]
+        statics.extend(_copper_shape_obstacles(board, layer, 0.0))
+        statics.extend(Obstacle(vertices=((via.x, via.y),), r=via.diameter / 2.0,
+                                net=via.net, label="via") for via in placed_vias)
+
+        crossed, _grazes, clipped = check_sketch(wires, statics, guard=GUARDBAND_NM)
+        crossings.extend((c.first, c.second, c.points) for c in crossed)
+        for clip in clipped:
+            obstacle = statics[clip.obstacle]
+            bx, by = _boundary_point(obstacle, clip.x, clip.y)
+            wire = next(link for link in group if link.key == clip.key)
+            required = wire.width / 2.0 + wire.clearance + GUARDBAND_NM
+            clips.append((clip.key, (bx, by, required)))
+    return crossings, clips
+
+
+def _boundary_point(obstacle: Obstacle, x: float, y: float) -> tuple[float, float]:
+    """The point on the copper's edge nearest an offending point of a path."""
+    if len(obstacle.vertices) == 1:
+        cx, cy = obstacle.vertices[0]
+        span = math.hypot(x - cx, y - cy)
+        if span < 1e-9:
+            return cx + obstacle.r, cy
+        return cx + (x - cx) / span * obstacle.r, cy + (y - cy) / span * obstacle.r
+
+    ring = list(obstacle.vertices)
+    closing = ring[1:] + ring[:1] if len(ring) > 2 else ring[1:]
+    best = (math.inf, ring[0])
+    for (ax, ay), (bx, by) in zip(ring, closing):
+        dx, dy = bx - ax, by - ay
+        span = dx * dx + dy * dy
+        t = 0.0 if span < 1e-12 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / span))
+        px, py = ax + t * dx, ay + t * dy
+        d = math.hypot(x - px, y - py)
+        if d < best[0]:
+            best = (d, (px, py))
+    px, py = best[1]
+    if obstacle.r > 0.0:
+        span = math.hypot(x - px, y - py)
+        if span > 1e-9:
+            px += (x - px) / span * obstacle.r
+            py += (y - py) / span * obstacle.r
+    return px, py
+
+
+def _ban_for_crossing(meshes: dict, usable, pieces: list["_Link"],
+                      first: int, second: int, x: float, y: float) -> set:
+    """Every turn that lets this crossing exist, banned at once.
+
+    Two mid-route wires through one triangle always share a doorway and rank keeps them
+    apart, so a crossing always has a terminal stub on at least one side. Banning just the
+    one turn the passing wire took moves it one triangle around the fan and the same
+    crossing comes back next round a doorway over -- measured, eight rounds of it. What the
+    passing wire must actually be denied is the *separation*: every way through the fan that
+    parts the other wire's terminal from its exit. That is one stub-segment intersection
+    test per pair of doorways per fan triangle, computed here in one go.
+    """
+    by_key = {link.key: link for link in pieces}
+    a, b = by_key.get(first), by_key.get(second)
+    if a is None or b is None:
+        return set()
+
+    def context(link):
+        leg = link.route
+        mesh = meshes[link.layer]
+        polyline = _flatten((float(link.pad_a.x), float(link.pad_a.y)),
+                            (float(link.pad_b.x), float(link.pad_b.y)), link.elements)
+        s_cross, s_total = 0.0, 0.0
+        best = math.inf
+        lengths = []
+        for (px, py), (qx, qy) in zip(polyline, polyline[1:]):
+            step = math.hypot(qx - px, qy - py)
+            lengths.append((s_total, (px, py), (qx, qy), step))
+            s_total += step
+        for s0, (px, py), (qx, qy), step in lengths:
+            if step < 1e-9:
+                continue
+            t = max(0.0, min(1.0, ((x - px) * (qx - px) + (y - py) * (qy - py))
+                             / (step * step)))
+            d = math.hypot(x - px - t * (qx - px), y - py - t * (qy - py))
+            if d < best:
+                best = d
+                s_cross = s0 + t * step
+        marks = []
+        for slot, key in enumerate(leg.portals):
+            pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+            ax, ay = float(pa[0]), float(pa[1])
+            dx, dy = float(pb[0]) - ax, float(pb[1]) - ay
+            hit = None
+            for s0, (px, py), (qx, qy), step in lengths:
+                ex, ey = qx - px, qy - py
+                denominator = dx * ey - dy * ex
+                if abs(denominator) < 1e-12:
+                    continue
+                t = ((px - ax) * ey - (py - ay) * ex) / denominator
+                u = ((px - ax) * dy - (py - ay) * dx) / denominator
+                if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+                    hit = s0 + u * step
+                    break
+            if hit is not None:
+                marks.append((hit, slot))
+        marks.sort()
+        before = [slot for s_here, slot in marks if s_here <= s_cross]
+        after = [slot for s_here, slot in marks if s_here > s_cross]
+        if before and after:
+            return False, None
+        # A stub, and which end: the crossing sits before the first doorway or after the last.
+        return True, ("tail" if before else "head")
+
+    a_stub, a_side = context(a)
+    b_stub, b_side = context(b)
+
+    def layer_index(link):
+        return usable.index(link.layer)
+
+    def fan_family(passer, owner, side) -> set:
+        """Deny ``passer`` every fan turn that separates ``owner``'s terminal from its exit.
+
+        ``side`` says which terminal: a wire has a stub at both ends, and guarding the head
+        while the crossing is at the tail bans turns nobody is taking.
+        """
+        leg = owner.route
+        mesh = meshes[owner.layer]
+        if not leg.portals:
+            return set()
+        if side == "tail":
+            centre = (float(owner.pad_b.x), float(owner.pad_b.y))
+            exit_key = leg.portals[-1]
+        else:
+            centre = (float(owner.pad_a.x), float(owner.pad_a.y))
+            exit_key = leg.portals[0]
+        exit_mid = _portal_mid(mesh, exit_key)
+
+        out: set = set()
+        layer = layer_index(owner)
+        ring = mesh.terminals(*centre)
+        for tri in ring:
+            doors = [portal.key() for _other, portal in mesh.adjacent(int(tri))]
+            for i_slot in range(len(doors)):
+                for j_slot in range(i_slot + 1, len(doors)):
+                    p, q = doors[i_slot], doors[j_slot]
+                    mp = _portal_mid(mesh, p)
+                    mq = _portal_mid(mesh, q)
+                    if _segments_cross(mp[0], mp[1], mq[0], mq[1],
+                                       centre[0], centre[1], exit_mid[0], exit_mid[1]):
+                        out.add((passer.net.code, layer, int(tri),
+                                 frozenset((_portal_key(p), _portal_key(q)))))
+        return out
+
+    def stub_bans(link, side) -> set:
+        leg = link.route
+        layer = layer_index(link)
+        if not leg.portals:
+            # A direct line with no doorways at all: nothing to ban but the shortcut itself.
+            return {(link.net.code, layer, -1, frozenset())}
+        if side == "tail":
+            return {(link.net.code, layer, int(leg.triangles[len(leg.portals) - 1]),
+                     frozenset((_portal_key(leg.portals[-1]),)))}
+        return {(link.net.code, layer, int(leg.triangles[0]),
+                 frozenset((_portal_key(leg.portals[0]),)))}
+
+    if not a_stub and b_stub:
+        return fan_family(a, b, b_side if _TAIL_FAMILIES else "head")
+    if not b_stub and a_stub:
+        return fan_family(b, a, a_side if _TAIL_FAMILIES else "head")
+    if a_stub and b_stub:
+        mover = a if len(a.route.portals) >= len(b.route.portals) else b
+        other = b if mover is a else a
+        mover_side = a_side if mover is a else b_side
+        other_side = b_side if mover is a else a_side
+        return stub_bans(mover, mover_side) | fan_family(mover, other, other_side)
+    # Both mid-route should be impossible; if the geometry disagrees, move the longer one
+    # off the shorter one's whole fan at both ends.
+    mover, other = (a, b) if a.span >= b.span else (b, a)
+    return fan_family(mover, other, "head") | fan_family(mover, other, "tail")
+
+
+def _lens_wrap(pieces: list["_Link"], first: int, second: int, points) -> tuple:
+    """One extra wrap point that starts unpicking a lens.
+
+    The two wires cross an even number of times; between the first pair of crossings one of
+    them is holding territory the other's taut path wants. The wire with the longer span has
+    the more slack, so it gives way: it is told to keep a full spacing off the midpoint of
+    the lens, measured on the other wire, and the next embedding pulls it around instead of
+    through. One point rarely finishes the job; the clip loop it feeds converges the same
+    way lazy obstacle addition always does.
+    """
+    by_key = {link.key: link for link in pieces}
+    a, b = by_key[first], by_key[second]
+    mover, other = (a, b) if a.span >= b.span else (b, a)
+
+    if len(points) >= 2:
+        cx = (points[0][0] + points[1][0]) / 2.0
+        cy = (points[0][1] + points[1][1]) / 2.0
+    else:
+        cx, cy = points[0]
+    required = (mover.width / 2.0 + other.width / 2.0
+                + max(mover.clearance, other.clearance) + GUARDBAND_NM)
+    return mover.key, (cx, cy, required)
+
+
+def _portal_mid(mesh: Mesh, key) -> tuple[float, float]:
+    pa, pb = mesh.points[key[0]], mesh.points[key[1]]
+    return (float(pa[0]) + float(pb[0])) / 2.0, (float(pa[1]) + float(pb[1])) / 2.0
+
+
+def _portal_key(key) -> tuple[int, int]:
+    return int(key[0]), int(key[1])
 
 
 def plan_board(board: Board, layers: list[str] | None = None,
@@ -813,89 +1091,125 @@ def plan_board(board: Board, layers: list[str] | None = None,
         on_layer[there] = {i for i, name in enumerate(usable) if link.pad_b.on_layer(name)}
         requests.append((link.key, link.net.code, here, there, prefer.get(link.key)))
 
-    chosen, stack_report = route_stack(
-        [meshes[layer] for layer in usable], sites, requests,
-        terminals=terminals, rounds=rounds, verbose=verbose)
+    # ---- route, embed, check, learn, repeat ----------------------------------------
+    #
+    # The sketch is not hoped legal; it is *made* legal, by the two feedback loops the two
+    # kinds of defect deserve. A wire clipping copper is an embedding problem: the copper had
+    # no vertex in the wire's doorways, so it is named as an extra wrap point and the wire is
+    # pulled taut again (lazy obstacle addition -- the exact solver's own trick). Two wires
+    # crossing is a *class* problem, and it is always a terminal stub, because two mid-route
+    # wires through one triangle must share a doorway and rank keeps ordered wires apart. A
+    # crossing therefore becomes a ban -- the moving wire may no longer make the turn that
+    # cut the other's terminal off -- and the whole stack is re-searched. Bans only
+    # accumulate, so this converges; the reference systems (SURF's region fans, Leiserson &
+    # Maley's terminal annotations) encode the same fact in the search space itself.
+    bans: set = set()
+    by_route = {link.key: link for link in links}
+    pieces: list[_Link] = []
+    placed_vias: list[_ViaPoint] = []
+    unrouted: list[_Link] = []
+    stack_report = None
+    sketch_stats = {"clip_wraps": 0, "cross_bans": 0, "sketch_rounds": 0}
+
+    chosen = None
+    movers: set | None = None
+    for _sketch_round in range(_SKETCH_ROUNDS):
+        sketch_stats["sketch_rounds"] += 1
+        chosen, stack_report = route_stack(
+            [meshes[layer] for layer in usable], sites, requests,
+            terminals=terminals, rounds=rounds, bans=frozenset(bans),
+            warm=chosen, only=movers, verbose=verbose)
+
+        # A via splits a connection into two connections that happen to meet at it, so from
+        # here on every piece is what it always was: one net, one layer, two fixed ends.
+        pieces = []
+        placed_vias = []
+        unrouted = []
+        for route in chosen:
+            parent = by_route[route.key]
+            if not route.found:
+                unrouted.append(parent)
+                continue
+            stops = [_pad_like(parent.pad_a)]
+            for index in route.vias:
+                site = sites[index]
+                point = _ViaPoint(x=site.x, y=site.y, net=parent.net.code,
+                                  owner=parent.key,
+                                  diameter=board.netclass_for(parent.net.name).via_diameter_nm,
+                                  drill=board.netclass_for(parent.net.name).via_drill_nm)
+                placed_vias.append(point)
+                stops.append(point)
+            stops.append(_pad_like(parent.pad_b))
+
+            for leg, (here, there) in zip(route.legs, zip(stops, stops[1:])):
+                piece = _Link(key=len(pieces), net=parent.net, pad_a=here, pad_b=there,
+                              span=math.dist((here.x, here.y), (there.x, there.y)),
+                              width=parent.width, clearance=parent.clearance,
+                              halo=parent.halo)
+                piece.parent = parent.key
+                piece.layer = usable[leg.layer]
+                piece.route = leg
+                pieces.append(piece)
+
+        by_layer = {layer: [link for link in pieces if link.layer == layer]
+                    for layer in usable}
+        extras: dict[int, list[tuple[float, float, float]]] = {}
+
+        crossings = []
+        for _clip_round in range(_CLIP_ROUNDS):
+            for layer, group in by_layer.items():
+                _embed_group(meshes[layer], group, extras)
+            crossings, clips = _check_pieces(board, meshes, usable, pieces, placed_vias)
+
+            # An even number of crossings between a pair is a *lens*: the classes are
+            # compatible -- a non-crossing embedding exists -- but each wire was pulled
+            # taut blind to the other and they bulge through each other in open space. The
+            # cure is geometric, exactly like a clip: the roomier wire is told to treat a
+            # point of the other as copper and is pulled taut again.
+            lenses = [entry for entry in crossings if len(entry[2]) % 2 == 0]
+            for first, second, points in lenses:
+                clips.append(_lens_wrap(pieces, first, second, points))
+
+            if not clips:
+                break
+            for key, extra in clips:
+                extras.setdefault(key, []).append(extra)
+                sketch_stats["clip_wraps"] += 1
+
+        crossings = [entry for entry in crossings if len(entry[2]) % 2 == 1]
+        if not crossings:
+            break
+
+        grown = False
+        movers = set()
+        parent_of = {piece.key: piece.parent for piece in pieces}
+        for first, second, points in crossings:
+            x, y = points[0]
+            family = _ban_for_crossing(meshes, usable, pieces, first, second, x, y)
+            fresh = family - bans
+            if fresh:
+                bans |= fresh
+                grown = True
+                sketch_stats["cross_bans"] += len(fresh)
+            for key in (first, second):
+                if parent_of.get(key) is not None:
+                    movers.add(parent_of[key])
+
+        if verbose:
+            print(f"  sketch round {_sketch_round + 1}: {len(crossings)} class crossings, "
+                  f"{len(bans)} bans, rerouting {len(movers)}")
+        if not grown:
+            break
+
+    for parent in unrouted:
+        result.failed.append((parent.net.code, parent.net.name,
+                              "no route through the free space on any layer"))
 
     topo_stats = {"rounds": stack_report.rounds, "overfull": len(stack_report.overfull),
                   "unroutable": stack_report.unroutable, "vias": stack_report.vias,
                   "converged": stack_report.converged}
-
-    # A via splits a connection into two connections that happen to meet at it, so from here
-    # on every piece is what it always was: one net, one layer, two fixed ends. Nothing
-    # downstream needs to learn about vias except the check, which must keep other nets off
-    # them, and the emitter.
-    pieces: list[_Link] = []
-    placed_vias: list[_ViaPoint] = []
-    by_route = {link.key: link for link in links}
-
-    for route in chosen:
-        parent = by_route[route.key]
-        if not route.found:
-            result.failed.append((parent.net.code, parent.net.name,
-                                  "no route through the free space on any layer"))
-            continue
-
-        stops = [_pad_like(parent.pad_a)]
-        for index in route.vias:
-            site = sites[index]
-            point = _ViaPoint(x=site.x, y=site.y, net=parent.net.code, owner=parent.key,
-                              diameter=board.netclass_for(parent.net.name).via_diameter_nm,
-                              drill=board.netclass_for(parent.net.name).via_drill_nm)
-            placed_vias.append(point)
-            stops.append(point)
-        stops.append(_pad_like(parent.pad_b))
-
-        for leg, (here, there) in zip(route.legs, zip(stops, stops[1:])):
-            piece = _Link(key=len(pieces), net=parent.net, pad_a=here, pad_b=there,
-                          span=math.dist((here.x, here.y), (there.x, there.y)),
-                          width=parent.width, clearance=parent.clearance,
-                          halo=parent.halo)
-            piece.parent = parent.key
-            piece.layer = usable[leg.layer]
-            piece.route = leg
-            pieces.append(piece)
-
+    topo_stats.update(sketch_stats)
     links = pieces
-    by_layer: dict[str, list[_Link]] = {layer: [] for layer in usable}
-    for link in links:
-        by_layer[link.layer].append(link)
-
-    for layer, group in by_layer.items():
-        if not group:
-            continue
-        mesh = meshes[layer]
-        routes = [_as_route(link) for link in group]
-
-        order = _consistent(routes, _crossing_order(mesh, routes))
-        wires = {link.key: RbWire(key=link.key, net=link.net.code,
-                                  half_width=link.width / 2.0,
-                                  clearance=link.clearance + GUARDBAND_NM)
-                 for link in group}
-
-        # Embed, re-read the order off the result, embed again. The first order is a guess
-        # from straight chords; two or three passes is enough for it to stop changing.
-        index = {link.key: link for link in group}
-        elements: dict[int, list] = {}
-        room: dict = {}
-        for _pass in range(_SEATING_PASSES):
-            elements = {route.key: _rubberband_elements(
-                            route.start, route.goal,
-                            _crossings_for(mesh, route, order, wires, room))
-                        for route in routes if route.found}
-            room = _bundle(mesh, routes, elements, wires)
-
-            settled_order = _consistent(routes, _order_from_geometry(mesh, routes, elements))
-            if settled_order == order:
-                break
-            order = settled_order
-
-        for route in routes:
-            link = index[route.key]
-            if not route.found:
-                link.reason = "no route through the free space"
-                continue
-            link.elements = elements.get(route.key, [])
 
     # ---- check the geometry, and repair what does not hold --------------------------
     checked = {"taut": 0, "fell_back": 0, "dropped": 0, "rescued": 0}
@@ -1157,6 +1471,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         "tracks": len(result.tracks),
         "arcs": result.arc_count,
         "length_mm": round(result.total_length_nm / 1e6, 2),
+        "vias": len(result.vias),
         **{f"topo_{k}": v for k, v in topo_stats.items()},
         **{f"embed_{k}": v for k, v in checked.items()},
     })

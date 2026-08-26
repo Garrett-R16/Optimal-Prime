@@ -338,6 +338,8 @@ class _Candidate:
     cy: float
     r: float
     ccw: bool
+    #: which entry of ``extras`` this wrap came from, if any
+    extra: int | None = None
 
 
 def _candidates(crossings: list[Crossing], lo: int, hi: int,
@@ -396,6 +398,41 @@ def _candidates(crossings: list[Crossing], lo: int, hi: int,
     return out
 
 
+def _extra_candidates(extras, lo, hi, crossings, x0, y0, x1, y1,
+                      claimed: set) -> list[_Candidate]:
+    """Wrap points the doorways never mentioned, learned from what the last try clipped.
+
+    A doorway sequence names the corners it crosses between and nothing else, so copper the
+    wire merely *passes* -- the flank of a neighbouring pad, the mid-edge of a long one -- has
+    no vertex in the crossing list and cannot be wrapped, however hard it is hit. Rather than
+    model every such possibility up front, the embedding is run, checked against real copper,
+    and each clip comes back here as a point with a required radius: the same lazy obstacle
+    addition the exact solver already lives by. The wrap side is the side of the path the
+    copper is already on, so the repair never changes the homotopy class.
+
+    ``claimed`` keeps one extra from being wrapped twice when the recursion splits: an arc is
+    one contact, not one contact per sub-range that can see the point.
+    """
+    out: list[_Candidate] = []
+    for slot, (px, py, required) in enumerate(extras):
+        if slot in claimed:
+            continue
+        foot = _foot_on_segment(px, py, x0, y0, x1, y1)
+        if foot is None:
+            continue
+        gap = math.hypot(px - foot[0], py - foot[1])
+        if gap >= required:
+            continue
+        index = lo
+        if hi > lo:
+            index = min(range(lo, hi),
+                        key=lambda k: math.dist(crossings[k].point(), (px, py)))
+        turn = _wind(x0, y0, x1, y1, px, py)
+        out.append(_Candidate(required - gap, min(max(index, lo), max(lo, hi - 1)),
+                              px, py, required, turn > 0, extra=slot))
+    return out
+
+
 def _contact_run(crossings: list[Crossing], index: int, lo: int, hi: int,
                  cx: float, cy: float) -> tuple[int, int]:
     """How many consecutive doorways share this obstacle -- they make one arc, not several."""
@@ -413,17 +450,25 @@ def _touches(crossing: Crossing, cx: float, cy: float) -> bool:
 
 
 def rubberband(start: tuple[float, float], goal: tuple[float, float],
-               crossings: list[Crossing], max_arcs: int = 400) -> list[Arc]:
-    """Pull one wire taut through its doorways. Returns the corners it wraps, in order."""
+               crossings: list[Crossing],
+               extras: tuple[tuple[float, float, float], ...] = (),
+               max_arcs: int = 400) -> list[Arc]:
+    """Pull one wire taut through its doorways. Returns the corners it wraps, in order.
+
+    ``extras`` are wrap points the doorways never mentioned, learned from what a previous
+    embedding clipped: (x, y, required radius). See :func:`_extra_candidates`.
+    """
 
     def solve(lo: int, hi: int, left: Arc | None, right: Arc | None) -> list[Arc]:
-        if hi <= lo or len(result) > max_arcs:
+        if (hi <= lo and not extras) or len(result) > max_arcs:
             return []
 
         p0 = (left.x1, left.y1) if left else start
         p1 = (right.x0, right.y0) if right else goal
 
         found = _candidates(crossings, lo, hi, p0[0], p0[1], p1[0], p1[1], start, goal)
+        found.extend(_extra_candidates(extras, lo, hi, crossings,
+                                       p0[0], p0[1], p1[0], p1[1], claimed))
         if not found:
             return []
 
@@ -454,14 +499,17 @@ def rubberband(start: tuple[float, float], goal: tuple[float, float],
             if right is not None:
                 right.x0, right.y0 = exit_[1]
 
+            if candidate.extra is not None:
+                claimed.add(candidate.extra)
             result.append(arc)
             before = solve(lo, first, left, arc)
-            after = solve(last + 1, hi, arc, right)
+            after = solve(min(last + 1, hi), hi, arc, right)
             return before + [arc] + after
 
         return []
 
     result: list[Arc] = []
+    claimed: set[int] = set()
     arcs = solve(0, len(crossings), None, None)
     return _drop_loops(start, goal, arcs)
 

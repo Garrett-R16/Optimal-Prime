@@ -175,3 +175,26 @@ def test_a_free_via_is_taken_and_a_dear_one_is_not():
     _, dear = route_stack(meshes, sites, job, terminals=reach, via_cost=1e12, rounds=2)
     assert dear.vias == 0
     assert free.vias >= dear.vias
+
+
+def test_a_banned_turn_diverts_the_route():
+    """Ban the exit a route takes from its start triangle; it must find another way."""
+    meshes = two_layers()
+    sites = via_sites(meshes, radius=0.6 * MM, clearance=0.2 * MM)
+    job = [(0, 1, (4.0 * MM, 20.0 * MM), (36.0 * MM, 20.0 * MM))]
+    reach = terminals_everywhere(meshes)
+
+    first, _ = route_stack(meshes, sites, job, terminals=reach, rounds=2)
+    assert first[0].found
+    leg = first[0].legs[0]
+    # triangles lead portals by one: triangles[0] is what portals[0] is crossed out of
+    assert len(leg.triangles) == len(leg.portals) + 1
+    tri, portal = leg.triangles[0], leg.portals[0]
+
+    banned = frozenset({(1, leg.layer, tri, frozenset((portal,)))})
+    second, report = route_stack(meshes, sites, job, terminals=reach, rounds=2,
+                                 bans=banned)
+    assert report.routed == 1
+    other = second[0].legs[0]
+    assert (other.triangles[0], other.portals[0]) != (tri, portal) \
+        or other.layer != leg.layer

@@ -80,6 +80,12 @@ class ArcTrack:
     length_nm: float = 0.0
 
 
+#: What one through via adds to a signal's length: the barrel is the board's thickness of
+#: conductor in series with the tracks. Counted so that "shorter" can never be bought by
+#: quietly moving distance into the third dimension.
+VIA_LENGTH_NM = 1_600_000
+
+
 @dataclass
 class RouteResult:
     tracks: list[Track | ArcTrack] = field(default_factory=list)
@@ -90,7 +96,7 @@ class RouteResult:
 
     @property
     def total_length_nm(self) -> float:
-        return sum(t.length_nm for t in self.tracks)
+        return sum(t.length_nm for t in self.tracks) + VIA_LENGTH_NM * len(self.vias)
 
     @property
     def arc_count(self) -> int:

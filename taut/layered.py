@@ -98,10 +98,26 @@ def _midpoint(mesh: Mesh, key: tuple[int, int]) -> tuple[float, float]:
     return float((a[0] + b[0]) / 2), float((a[1] + b[1]) / 2)
 
 
+def _crosses_avoid(avoid, layer: int, ax: float, ay: float, bx: float, by: float) -> bool:
+    """Would a step from a to b on this layer cross any committed wire it must respect?"""
+    lo_x, hi_x = (ax, bx) if ax <= bx else (bx, ax)
+    lo_y, hi_y = (ay, by) if ay <= by else (by, ay)
+    for wall_layer, polyline, box in avoid:
+        if wall_layer != layer:
+            continue
+        if hi_x < box[0] or box[2] < lo_x or hi_y < box[1] or box[3] < lo_y:
+            continue
+        for (px, py), (qx, qy) in zip(polyline, polyline[1:]):
+            if _crosses(ax, ay, bx, by, px, py, qx, qy):
+                return True
+    return False
+
+
 def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             start_tris: list[list[int]], goal_tris: list[list[int]], net: int,
             price, via_cost: float, prefer: int | None = None,
-            bias: float = 1.0, node_limit: int = 600_000):
+            bias: float = 1.0, bans: frozenset = frozenset(),
+            avoid: tuple = (), node_limit: int = 600_000):
     """A* over (layer, triangle), stepping doorway to doorway and layer to layer."""
     goals = {(layer, tri) for layer, tris in enumerate(goal_tris) for tri in tris}
     if not goals or not any(start_tris):
@@ -115,8 +131,11 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
         index for index in range(len(meshes)) if index != prefer]
     for layer in order:
         together = set(start_tris[layer]) & set(goal_tris[layer])
-        if together and meshes[layer].clear_between(start, goal):
-            return [(layer, next(iter(together)), ("d",))]
+        if (together and meshes[layer].clear_between(start, goal)
+                and not _crosses_avoid(avoid, layer, start[0], start[1],
+                                       goal[0], goal[1])):
+            home = next(iter(together))
+            return (layer, home), [(layer, home, ("d",))]
 
     gx, gy = goal
     cache: dict[tuple[int, tuple[int, int]], tuple[float, float]] = {}
@@ -152,10 +171,16 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
     origins = {(layer, tri) for layer, tris in enumerate(start_tris) for tri in tris}
     for layer, tri in sorted(origins):
         _expand(meshes, sites, by_triangle, layer, tri, origins, price, net, via_cost,
-                lambda state, charge, extra: relax(
-                    0.0, state, None, start[0], start[1],
+                lambda state, charge, extra, _l=layer, _t=tri: relax(
+                    0.0, state, ("S", _l, _t), start[0], start[1],
                     charge * (bias if prefer is not None and state[0] != prefer else 1.0),
-                    extra))
+                    extra)
+                if not (state[2][0] == "p"
+                        and ((net, _l, _t, frozenset((state[2][1],))) in bans
+                             or (avoid and _crosses_avoid(
+                                 avoid, state[0], start[0], start[1],
+                                 *where(state[0], state[2])))))
+                else None)
 
     expanded = 0
     final = None
@@ -171,22 +196,36 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
         if expanded > node_limit:
             return None
         px, py = where(layer, marker)
+        entered = marker[1] if marker[0] == "p" else None
         _expand(meshes, sites, by_triangle, layer, tri, set(), price, net, via_cost,
                 lambda nxt, charge, extra, _c=cost, _s=state, _p=(px, py):
                 relax(_c, nxt, _s, _p[0], _p[1],
                       charge * (bias if prefer is not None and nxt[0] != prefer else 1.0),
-                      extra) if nxt[2] != marker else None)
+                      extra)
+                if nxt[2] != marker and not (
+                    nxt[2][0] == "p"
+                    and ((net, layer, tri, frozenset((nxt[2][1],))) in bans
+                         or (entered is not None
+                             and (net, layer, tri,
+                                  frozenset((entered, nxt[2][1]))) in bans)
+                         or (avoid and _crosses_avoid(
+                             avoid, nxt[0], px, py, *where(nxt[0], nxt[2])))))
+                else None)
 
     if final is None:
         return None
 
     walk = []
     cursor = final
+    origin = None
     while cursor is not None:
+        if cursor[0] == "S":
+            origin = (cursor[1], cursor[2])
+            break
         walk.append(cursor)
         cursor = came[cursor]
     walk.reverse()
-    return walk
+    return origin, walk
 
 
 def _expand(meshes, sites, by_triangle, layer: int, tri: int, skip, price, net: int,
@@ -289,11 +328,22 @@ def _blame(meshes: list[Mesh], route: Route, where, history: dict) -> None:
 def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 terminals, via_cost: float = VIA_COST_NM, rounds: int = 12,
                 present: float = 0.6, bias: float = OFF_PREFERENCE,
+                bans: frozenset = frozenset(), warm: list | None = None,
+                only: set | None = None, avoid_for: dict | None = None,
                 verbose: bool = False):
     """Choose a route for every connection at once, over the whole stack.
 
-    ``requests`` are ``(key, net, start, goal)``; ``terminals(point)`` gives, per layer, the
-    free triangles a connection may leave that point by -- empty for a layer the pad is not on.
+    ``requests`` are ``(key, net, start, goal, preferred_layer?)``; ``terminals(point)``
+    gives, per layer, the free triangles a connection may leave that point by -- empty for a
+    layer the pad is not on.
+
+    ``bans`` are turns a specific net may not make: ``(net, layer, triangle,
+    frozenset({portal_in, portal_out}))``. A wire that enters a triangle and leaves it by two
+    edges that are not another wire's exit separates that wire's terminal from its own first
+    doorway -- they *must* cross, and no shared doorway ever records it. The reference systems
+    make such moves unrepresentable (SURF's region fans; the valid-point pruning in Zhan
+    2017); a ban is the same fact expressed to this search. Bans only accumulate, so reroute
+    rounds converge: the banned net goes around the terminal or buys a via.
     """
     #: Which layer each connection would rather be on, worked out before any search from
     #: which straight pad-to-pad lines cross which. It is a preference and not a rule: the
@@ -301,6 +351,20 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
     wanted = {entry[0]: (entry[4] if len(entry) > 4 else None) for entry in requests}
     routes = [Route(key=entry[0], net=entry[1], start=entry[2], goal=entry[3])
               for entry in requests]
+
+    # A repair pass re-routes only the wires implicated in a defect, against everything else
+    # exactly where it stands. Re-negotiating the whole board for one bad turn churns every
+    # route and accumulates stale constraints; the reference systems repair sequentially for
+    # this reason, and so does this.
+    if warm is not None:
+        by_key = {route.key: route for route in warm}
+        for route in routes:
+            old = by_key.get(route.key)
+            if old is not None and old.found:
+                route.legs = [Leg(layer=leg.layer, start=leg.start, goal=leg.goal,
+                                  triangles=list(leg.triangles),
+                                  portals=list(leg.portals)) for leg in old.legs]
+                route.vias = list(old.vias)
     report = StackReport()
     by_triangle = sites_by_triangle(sites, len(meshes))
 
@@ -331,10 +395,16 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                     holders.discard(route.net)
 
         for route in routes:
-            walk = _search(meshes, sites, by_triangle, route.start, route.goal,
-                           reach(route.start), reach(route.goal), route.net,
-                           price, via_cost, wanted.get(route.key), bias)
-            _rebuild(route, walk, sites)
+            if only is not None and route.key not in only and route.found:
+                for resource in route.uses():
+                    usage.setdefault(resource, set()).add(route.net)
+                continue
+            found = _search(meshes, sites, by_triangle, route.start, route.goal,
+                            reach(route.start), reach(route.goal), route.net,
+                            price, via_cost, wanted.get(route.key), bias, bans,
+                            tuple((avoid_for or {}).get(route.key, ())))
+            origin, walk = found if found else (None, None)
+            _rebuild(route, origin, walk, sites)
             for resource in route.uses():
                 usage.setdefault(resource, set()).add(route.net)
 
@@ -376,8 +446,14 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
     return routes, report
 
 
-def _rebuild(route: Route, walk, sites: list[Site]) -> None:
-    """Turn the search's states back into legs, split wherever it changed layer."""
+def _rebuild(route: Route, origin, walk, sites: list[Site]) -> None:
+    """Turn the search's states back into legs, split wherever it changed layer.
+
+    Each leg's ``triangles`` lead its ``portals`` by one: ``triangles[i]`` is the triangle
+    ``portals[i]`` is crossed *out of*, and the last triangle is where the leg ends. The
+    stub ban needs that alignment -- "may not leave triangle T by portal P" is only
+    expressible if T is on record.
+    """
     route.legs = []
     route.vias = []
     if not walk:
@@ -385,10 +461,13 @@ def _rebuild(route: Route, walk, sites: list[Site]) -> None:
 
     opening = walk[0][2][2] if walk[0][2][0] == "v" else walk[0][0]
     leg = Leg(layer=opening, start=route.start, goal=route.goal)
+    if origin is not None:
+        leg.triangles.append(origin[1])
     for layer, tri, marker in walk:
         if marker[0] == "d":
             leg.layer = layer
-            leg.triangles.append(tri)
+            if tri not in leg.triangles:
+                leg.triangles.append(tri)
             continue
         if marker[0] == "v":
             site = sites[marker[1]]
