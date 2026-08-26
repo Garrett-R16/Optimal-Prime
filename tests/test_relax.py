@@ -170,3 +170,4 @@ def test_relaxation_never_leaves_a_band_overlapping_a_pad():
                 for wall in obstacles:
                     assert not wall.contains(x, y, tol=1e-6), \
                         "a band may overlap another band on the way, never a wall"
+
