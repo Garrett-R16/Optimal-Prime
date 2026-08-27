@@ -39,22 +39,50 @@ pairwise-crossing ladders, forced vias, via-length accounting. 81 tests.
 
 ## The one open problem, and the measured prize
 
-**13 pairs of wires still cross in the pure sketch**, and every one involves a terminal stub
-or a portal-less straight leg — the two things no doorway governs. Those pairs are made legal
-today by the check-phase fallback (18 wires), which costs the exact thing the measurement
-shows: with the sketch fully legal, placement is order-free, and shortest-first alone reached
-**643.6 mm** on sonde xilinx — 76 mm below the current answer — before two stranded
-connections forced the retreat to 719.6.
+**13 pairs of wires still cross in the pure sketch**, every one involving a terminal stub or a
+portal-less straight leg — the two things no doorway governs. The check-phase fallback makes
+them legal today (18–27 wires), at the cost the measurement shows: with a fully legal sketch,
+placement is order-free, and shortest-first placement alone reached **643.6 mm** on sonde
+xilinx — 76 mm below the standing answer — before two stranded connections forced the retreat
+to 719.6. The excess is diffuse: dozens of short wires each bent slightly around long wires
+placed before them.
 
-Five attacks on those 13 are in the log with numbers, all reverted: single fan-turn bans
-(walk the fan one triangle per round, forever), geometric walls from committed polylines
-(over-block: bought vias and 120 mm), telling straight legs their crossed doorways (rank
-stacks bend them: +3.3 mm and a short), wrapping a straight leg's terminal (wrap side
-ambiguous at a crossing: +63 mm and a sliver), pinned bundle members (pinned positions
-violate neighbour gaps and poison the room bounds: taut rate collapsed 49→17).
+Everything tried against this is in the log with numbers, all reverted:
 
-What the papers say the missing piece is (SURF's region fans; Leiserson–Maley's
-left/right/terminal annotations; Zhan's edge-splitting): terminals need an explicit angular
-*sector* representation that participates in the search, so a stub is a first-class occupant
-of its fan and a separating wire is unrepresentable, not discovered post hoc. That is the
-next real piece of work, and it is worth 76 mm and the fallback's retirement.
+*Against the crossings* — single fan-turn bans (walk the fan one triangle per round, forever);
+side-aware tail families (identical); geometric walls from committed polylines (over-block:
+vias and +120 mm); stub-only walls (+20 mm, one drop); banning the straight-leg shortcut
+(dropped a connection); wrapping a straight leg's terminal (side-ambiguous at a crossing:
++63 mm and a sliver); six variants of pinned bundle members — straight legs enumerating their
+doorways and sitting fixed while others seat around them by topological rank (each collapsed
+the taut rate ~49→17 board-wide; the last variant isolated the cause to rank-vs-geometry
+seating and still lost).
+
+*Against the placement wall* — deferred rip-up rescue (7 min, futile); promoting the stranded
+to the front (rotates who strands); inline rescue at strand time (one of two rescued);
+deepened rip-up (depth 6 / limit 10: exponential, >10 min); single-wire re-offers after
+placement (zero gain — every wire is already at its best response; the 643 is a different
+equilibrium); joint cluster re-placement of the worst-excess wires (inverse selection: the
+top-excess wires are the long ones whose excess is irreducible); a placement-level via split
+for the stranded wire, solver to a site on one face and onward on the other (no clear site
+among the 24 nearest — the board is genuinely full there).
+
+## Where the remaining 76 mm actually lives
+
+Not in any single wire, and not reachable by local search from the longest-first equilibrium.
+The two orderings are different Nash equilibria of the same game; every local tool tried —
+re-offers, clusters, rip-up, vias — moves within an equilibrium, not between them. The papers'
+answer is to make the *sketch* legal so that no placement order exists at all: SURF's region
+fans give terminals angular sectors that participate in the search, which is precisely the
+structure the six pinned-member variants approximated from outside and could not reach. That
+is a rebuild of the embedding's search space, not a patch, and it is the one remaining piece
+between this branch and provably order-free minimal-length output.
+
+## Why this is still the right direction
+
+`main` reaches the same completeness in 324 s with nothing bounding quality. This branch
+decides classes before geometry, embeds them taut, referees the whole sketch, repairs by
+feedback, places vias where they pay for their barrel, and finishes both demo boards faster
+than `main` with equal or better copper. ecc83-pp stands at **1.008× the straight-line
+floor** — for a board with no forced conflicts, the method is already at the optimum it
+promises.
