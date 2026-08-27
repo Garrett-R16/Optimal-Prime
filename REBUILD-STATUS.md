@@ -37,52 +37,49 @@ First-principles scenes (`tests/scenes.py`) drive all of it end to end through r
 `.kicad_pcb` text: analytic taut lengths, fan cuts on one and two layers, stub grazes,
 pairwise-crossing ladders, forced vias, via-length accounting. 81 tests.
 
-## The one open problem, and the measured prize
+## Crossings are settled by cost, with bans as the completeness fallback
 
-**13 pairs of wires still cross in the pure sketch**, every one involving a terminal stub or a
-portal-less straight leg — the two things no doorway governs. The check-phase fallback makes
-them legal today (18–27 wires), at the cost the measurement shows: with a fully legal sketch,
-placement is order-free, and shortest-first placement alone reached **643.6 mm** on sonde
-xilinx — 76 mm below the standing answer — before two stranded connections forced the retreat
-to 719.6. The excess is diffuse: dozens of short wires each bent slightly around long wires
-placed before them.
+The residual sketch crossings are resolved the way the board itself would resolve them: by
+price. Each wire of a crossing pair is asked what its cheapest legal path would be with the
+other standing — the exact solver against the full current sketch — and whoever moves cheaper,
+moves; the mover's geometry is fixed and everyone else seats around it. On sonde xilinx this
+dissolves 14 of 15 crossings in two rounds and reaches **708.9 mm**.
 
-Everything tried against this is in the log with numbers, all reverted:
+The scene that forced this design (`crossing_highway` in `tests/scenes.py`): a straight wire
+crossed by a front-only wire. Doctrine says the straight wire stays straight and the other
+dives under with two vias (+3.2 mm of barrel); the optimum bends the straight wire around the
+other's pad (+2.3 mm). Every mechanism built on "straight wires stay straight" — six pinned-
+member variants included — was optimizing the wrong invariant. The only invariants are legal
+and minimal.
 
-*Against the crossings* — single fan-turn bans (walk the fan one triangle per round, forever);
-side-aware tail families (identical); geometric walls from committed polylines (over-block:
-vias and +120 mm); stub-only walls (+20 mm, one drop); banning the straight-leg shortcut
-(dropped a connection); wrapping a straight leg's terminal (side-ambiguous at a crossing:
-+63 mm and a sliver); six variants of pinned bundle members — straight legs enumerating their
-doorways and sitting fixed while others seat around them by topological rank (each collapsed
-the taut rate ~49→17 board-wide; the last variant isolated the cause to rank-vs-geometry
-seating and still lost).
+Cost settling has one blind spot no blame can trace: reshaping the sketch can leave a third
+wire homeless, and that survived per-settlement vetoes, inverted movers, rip-up to depth six,
+and a via audition — all measured. Meanwhile the ban machinery's +10.7 mm topology reshuffle,
+which looked like pure cost, is exactly what houses that wire. So the two run tiered: settle
+first; if anyone is stranded, the pipeline runs once more in ban mode, which completes.
+**A complete board outranks a shorter one, always.**
 
-*Against the placement wall* — deferred rip-up rescue (7 min, futile); promoting the stranded
-to the front (rotates who strands); inline rescue at strand time (one of two rescued);
-deepened rip-up (depth 6 / limit 10: exponential, >10 min); single-wire re-offers after
-placement (zero gain — every wire is already at its best response; the 643 is a different
-equilibrium); joint cluster re-placement of the worst-excess wires (inverse selection: the
-top-excess wires are the long ones whose excess is irreducible); a placement-level via split
-for the stranded wire, solver to a site on one face and onward on the other (no clear site
-among the 24 nearest — the board is genuinely full there).
+| | connections | copper | DRC | path taken |
+|---|---|---|---|---|
+| ecc83-pp | 20/20 | 239.52 mm (1.008× floor) | 0 | settle |
+| sonde xilinx | 66/66 | 719.59 mm | 0 | settle strands one → ban mode |
 
-## Where the remaining 76 mm actually lives
+## The measured frontier, still open
 
-Not in any single wire, and not reachable by local search from the longest-first equilibrium.
-The two orderings are different Nash equilibria of the same game; every local tool tried —
-re-offers, clusters, rip-up, vias — moves within an equilibrium, not between them. The papers'
-answer is to make the *sketch* legal so that no placement order exists at all: SURF's region
-fans give terminals angular sectors that participate in the search, which is precisely the
-structure the six pinned-member variants approximated from outside and could not reach. That
-is a rebuild of the embedding's search space, not a patch, and it is the one remaining piece
-between this branch and provably order-free minimal-length output.
+Two shorter answers exist and are real, both blocked by the same wire (`/TD0-PROG-D4`, 6.75 mm
+in the densest region): the settle pass at **708.9 mm** (strands it), and shortest-first
+placement at **643.6 mm** (strands it plus one more). Every local tool loses to it; the ban
+reshuffle is the one configuration measured to house it, at +10.7 mm. Getting the shorter
+boards *and* that wire means global search the current architecture approximates but does not
+have: SURF's region-fan search space, where terminals are angular sectors and a stub conflict
+is unrepresentable rather than repaired. That remains the one structural piece left, and it is
+a rebuild of the embedding's search space, not a patch.
 
-## Why this is still the right direction
+## Why this is the right direction
 
 `main` reaches the same completeness in 324 s with nothing bounding quality. This branch
-decides classes before geometry, embeds them taut, referees the whole sketch, repairs by
-feedback, places vias where they pay for their barrel, and finishes both demo boards faster
-than `main` with equal or better copper. ecc83-pp stands at **1.008× the straight-line
-floor** — for a board with no forced conflicts, the method is already at the optimum it
-promises.
+decides classes before geometry, embeds them taut, referees the whole sketch, prices conflict
+resolutions, places vias where they pay for their barrel (charged 1.6 mm each to total
+length), and guarantees completeness by construction. On an uncongested board it sits 0.8%
+off the absolute floor — the optimum the method promises. 83 tests, all through real
+`.kicad_pcb` files and `kicad-cli` DRC.
