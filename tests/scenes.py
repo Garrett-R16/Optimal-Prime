@@ -187,6 +187,34 @@ def fan_cut_one_layer(tmp_path: Path) -> Path:
          ("B1", 15.0, 6.0, 2, True), ("B2", 15.0, 14.0, 2, True)]))
 
 
+def highway(tmp_path: Path) -> Path:
+    """A long straight leg with company: neighbours that share its doorways but never cross.
+
+    Net H runs the length of the board, dead straight. Nets P and Q run parallel above and
+    below, close enough that all three thread the same doorways between the flanking pads.
+    The right answer keeps H exactly straight and P and Q taut beside it.
+    """
+    return write_scene(tmp_path, "highway", scene(
+        40.0, 20.0, ["H", "P", "Q", "W1", "W2", "W3", "W4"],
+        [("H1", 4.0, 10.0, 1), ("H2", 36.0, 10.0, 1),
+         ("P1", 4.0, 8.0, 2), ("P2", 36.0, 8.0, 2),
+         ("Q1", 4.0, 12.0, 3), ("Q2", 36.0, 12.0, 3),
+         ("B1", 14.0, 4.5, 4), ("B2", 14.0, 15.5, 5),
+         ("B3", 26.0, 4.5, 6), ("B4", 26.0, 15.5, 7)]))
+
+
+def crossing_highway(tmp_path: Path) -> Path:
+    """A straight leg crossed by a wire, all pads on the front only.
+
+    One of the two must yield, and the cheaper yield is H bending around X's pad -- the
+    scene that proved "a straight wire stays straight" is doctrine, not optimality.
+    """
+    return write_scene(tmp_path, "crossing-highway", scene(
+        40.0, 20.0, ["H", "X"],
+        [("H1", 4.0, 10.0, 1, True), ("H2", 36.0, 10.0, 1, True),
+         ("X1", 20.0, 5.0, 2, True), ("X2", 20.0, 15.0, 2, True)]))
+
+
 def two_through_a_gap(tmp_path: Path) -> Path:
     """Two nets share one doorway between two blocks; both must fit, correctly spaced."""
     return write_scene(tmp_path, "two-through-a-gap", scene(

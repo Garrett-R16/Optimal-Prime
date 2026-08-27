@@ -21,8 +21,8 @@ from taut.sketch import SketchWire, check_sketch
 from taut.tangent import PathArc, PathLine, TautPath
 from taut.units import GUARDBAND_NM
 
-from scenes import (MM, crossing_ladder, fan_cut, fan_cut_one_layer, one_disc,
-                    open_pair, stub_graze, two_through_a_gap)
+from scenes import (MM, crossing_highway, crossing_ladder, fan_cut, fan_cut_one_layer,
+                    highway, one_disc, open_pair, stub_graze, two_through_a_gap)
 
 
 # --------------------------------------------------------------- running a scene
@@ -147,6 +147,33 @@ def test_crossing_ladder_needs_the_third_dimension(tmp_path):
 def test_two_through_a_gap_are_spaced_not_stacked(tmp_path):
     board, result = routed(two_through_a_gap(tmp_path))
     assert_clean(board, result, 2)
+
+
+def test_highway_keeps_the_straight_leg_straight(tmp_path):
+    """Straight leg plus parallel company: legal, and nobody bends who need not."""
+    board, result = routed(highway(tmp_path))
+    # the four B pads are one-pad nets: walls, not connections
+    assert_clean(board, result, 3)
+    by_net = {}
+    for track in result.tracks:
+        by_net.setdefault(track.net, 0.0)
+        by_net[track.net] += track.length_nm
+    assert by_net[1] <= 32.0 * MM * 1.02
+    assert by_net[2] <= 32.0 * MM * 1.05
+    assert by_net[3] <= 32.0 * MM * 1.05
+
+
+def test_crossing_highway_settles_by_cost(tmp_path):
+    """One of the two crossing wires must yield, and the cheaper yield must win.
+
+    The candidates: H bends around X's pad (+~2.3 mm), or X dives under with two vias
+    (+3.2 mm of barrel). The optimum bends H -- the "obvious" rule that a straight wire
+    stays straight is doctrine, not optimality, which is why moves are priced instead.
+    """
+    board, result = routed(crossing_highway(tmp_path))
+    assert_clean(board, result, 2)
+    floor = 2.0 * math.hypot(16.0, 6.1) * MM + 10.0 * MM
+    assert result.total_length_nm <= floor * 1.04
 
 
 def test_via_length_is_counted(tmp_path):

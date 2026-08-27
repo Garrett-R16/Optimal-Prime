@@ -718,11 +718,20 @@ _CLIP_ROUNDS = 4
 
 _TAIL_FAMILIES = True
 
+#: How many times placement may veto a settlement and send the whole pipeline round again.
+_VETO_ROUNDS = 3
 
-def _embed_group(mesh: Mesh, group: list["_Link"], extras: dict) -> None:
-    """Pull one layer's wires taut together, seating them against each other by rank."""
+
+def _embed_group(mesh: Mesh, group: list["_Link"], extras: dict,
+                 resolved: dict | None = None) -> None:
+    """Pull one layer's wires taut together, seating them against each other by rank.
+
+    A wire in ``resolved`` was moved by the cost arbiter and its geometry is settled: it is
+    seated -- everyone else keeps clear of where it actually is -- but never re-pulled.
+    """
     if not group:
         return
+    resolved = resolved or {}
     routes = [_as_route(link) for link in group]
     order = _consistent(routes, _crossing_order(mesh, routes))
     wires = {link.key: RbWire(key=link.key, net=link.net.code,
@@ -737,11 +746,17 @@ def _embed_group(mesh: Mesh, group: list["_Link"], extras: dict) -> None:
     elements: dict[int, list] = {}
     room: dict = {}
     for _pass in range(_SEATING_PASSES):
-        elements = {route.key: _rubberband_elements(
-                        route.start, route.goal,
-                        _crossings_for(mesh, route, order, wires, room),
-                        tuple(extras.get(route.key, ())))
-                    for route in routes if route.found}
+        elements = {}
+        for route in routes:
+            if not route.found:
+                continue
+            if route.key in resolved:
+                elements[route.key] = list(resolved[route.key])
+                continue
+            elements[route.key] = _rubberband_elements(
+                route.start, route.goal,
+                _crossings_for(mesh, route, order, wires, room),
+                tuple(extras.get(route.key, ())))
         room = _bundle(mesh, routes, elements, wires)
 
     for route in routes:
@@ -950,6 +965,68 @@ def _ban_for_crossing(meshes: dict, usable, pieces: list["_Link"],
     return fan_family(mover, other, "head") | fan_family(mover, other, "tail")
 
 
+def _settle_crossing(board: Board, meshes: dict, usable, pieces: list["_Link"],
+                     resolved: dict, first: int, second: int, boundary,
+                     frozen: frozenset = frozenset()):
+    """Price both ways out of a crossing and commit the cheaper wire's move.
+
+    The cost of moving a wire is what the exact solver charges for its shortest legal path
+    with everything else -- copper and every other wire's current geometry -- standing.
+    Whoever pays less, pays; ties go to the longer wire, which has the slack.
+    """
+    if ("off",) in frozen:
+        # Arbitration stood down: placement could not house everyone under any settlement,
+        # and a complete board outranks a shorter one.
+        return None
+
+    by_key = {link.key: link for link in pieces}
+    a, b = by_key.get(first), by_key.get(second)
+    if a is None or b is None:
+        return None
+
+    def blockers_for(link: "_Link") -> list:
+        half = link.width / 2.0 + GUARDBAND_NM
+        out = [pad_obstacle(pad, link.clearance, half) for pad in board.pads
+               if pad.on_layer(link.layer) and pad.net != link.net.code]
+        out.extend(_copper_shape_obstacles(board, link.layer, link.clearance + half))
+        for other in pieces:
+            if other.key == link.key or other.layer != link.layer:
+                continue
+            if other.net.code == link.net.code or not other.elements:
+                continue
+            gap = (max(link.clearance, other.clearance) + link.width / 2.0
+                   + other.width / 2.0 + GUARDBAND_NM)
+            out.extend(_path_obstacles(_as_path(other.elements), gap, other.net.code))
+        return out
+
+    offers = []
+    for link in (a, b):
+        edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
+        try:
+            found = _solve_lazily((float(link.pad_a.x), float(link.pad_a.y)),
+                                  (float(link.pad_b.x), float(link.pad_b.y)),
+                                  blockers_for(link),
+                                  boundary=boundary, boundary_gap=edge_gap)
+        except NoPathFound:
+            continue
+        current = _as_path(link.elements).length if link.elements else link.span
+        pieces_out = []
+        for element in found.elements:
+            if isinstance(element, PathLine):
+                pieces_out.append(Line(element.x1, element.y1, element.x2, element.y2))
+            else:
+                pieces_out.append(Curve(element.cx, element.cy, element.r,
+                                        element.start_angle, element.end_angle,
+                                        element.ccw))
+        offers.append((found.length - current, -link.span, link.key, pieces_out))
+
+    if not offers:
+        return None
+    offers.sort()
+    _cost, _tie, mover_key, elements = offers[0]
+    return mover_key, elements
+
+
 def _lens_wrap(pieces: list["_Link"], first: int, second: int, points) -> tuple:
     """One extra wrap point that starts unpicking a lens.
 
@@ -984,7 +1061,9 @@ def _portal_key(key) -> tuple[int, int]:
 
 
 def plan_board(board: Board, layers: list[str] | None = None,
-               rounds: int = 12, verbose: bool = False) -> RouteResult:
+               rounds: int = 12, verbose: bool = False,
+               _frozen_movers: frozenset = frozenset(),
+               _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
     usable = tuple(layers) if layers else board.copper_layers
     result = RouteResult()
@@ -1109,22 +1188,21 @@ def plan_board(board: Board, layers: list[str] | None = None,
     placed_vias: list[_ViaPoint] = []
     unrouted: list[_Link] = []
     stack_report = None
-    sketch_stats = {"clip_wraps": 0, "cross_bans": 0, "sketch_rounds": 0}
+    sketch_stats = {"clip_wraps": 0, "cross_settled": 0, "cross_bans": 0,
+                    "sketch_rounds": 0}
 
-    chosen = None
-    movers: set | None = None
-    for _sketch_round in range(_SKETCH_ROUNDS):
-        sketch_stats["sketch_rounds"] += 1
-        chosen, stack_report = route_stack(
-            [meshes[layer] for layer in usable], sites, requests,
-            terminals=terminals, rounds=rounds, bans=frozenset(bans),
-            warm=chosen, only=movers, verbose=verbose)
+    ban_mode = ("off",) in _frozen_movers
+    bans: set = set()
+    chosen, stack_report = route_stack(
+        [meshes[layer] for layer in usable], sites, requests,
+        terminals=terminals, rounds=rounds, verbose=verbose)
+    resolved: dict[int, list] = {}
+    boundary_of = _board_boundary(board)
 
-        # A via splits a connection into two connections that happen to meet at it, so from
-        # here on every piece is what it always was: one net, one layer, two fixed ends.
-        pieces = []
-        placed_vias = []
-        unrouted = []
+    def _rebuild_pieces() -> None:
+        pieces.clear()
+        placed_vias.clear()
+        unrouted.clear()
         for route in chosen:
             parent = by_route[route.key]
             if not route.found:
@@ -1140,7 +1218,6 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 placed_vias.append(point)
                 stops.append(point)
             stops.append(_pad_like(parent.pad_b))
-
             for leg, (here, there) in zip(route.legs, zip(stops, stops[1:])):
                 piece = _Link(key=len(pieces), net=parent.net, pad_a=here, pad_b=there,
                               span=math.dist((here.x, here.y), (there.x, there.y)),
@@ -1151,6 +1228,14 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 piece.route = leg
                 pieces.append(piece)
 
+    for _sketch_round in range(_SKETCH_ROUNDS):
+        sketch_stats["sketch_rounds"] += 1
+
+        # A via splits a connection into pieces that are each one net, one layer, two
+        # fixed ends; in ban mode a topology re-search rebuilds them between rounds.
+        if not pieces:
+            _rebuild_pieces()
+
         by_layer = {layer: [link for link in pieces if link.layer == layer]
                     for layer in usable}
         extras: dict[int, list[tuple[float, float, float]]] = {}
@@ -1158,7 +1243,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         crossings = []
         for _clip_round in range(_CLIP_ROUNDS):
             for layer, group in by_layer.items():
-                _embed_group(meshes[layer], group, extras)
+                _embed_group(meshes[layer], group, extras, resolved)
             crossings, clips = _check_pieces(board, meshes, usable, pieces, placed_vias)
 
             # An even number of crossings between a pair is a *lens*: the classes are
@@ -1181,25 +1266,64 @@ def plan_board(board: Board, layers: list[str] | None = None,
         if not crossings:
             break
 
-        grown = False
-        movers = set()
-        parent_of = {piece.key: piece.parent for piece in pieces}
-        for first, second, points in crossings:
-            x, y = points[0]
-            family = _ban_for_crossing(meshes, usable, pieces, first, second, x, y)
-            fresh = family - bans
-            if fresh:
-                bans |= fresh
-                grown = True
-                sketch_stats["cross_bans"] += len(fresh)
-            for key in (first, second):
-                if parent_of.get(key) is not None:
-                    movers.add(parent_of[key])
+        if ban_mode:
+            # Completeness mode. Settling by cost gives the shorter board, but its
+            # reshaping of the sketch can leave a wire with no home in a way no blame can
+            # trace -- measured surviving per-settlement vetoes, inverted movers, deep
+            # rip-up and a via audition. The ban machinery reshapes the *topology* instead
+            # -- the passing net loses every fan turn that separates the other wire's
+            # terminal from its exit, and only the implicated connections are re-searched
+            # -- which costs about ten millimetres more and is the configuration measured
+            # to house everyone.
+            grown = False
+            movers = set()
+            parent_of = {piece.key: piece.parent for piece in pieces}
+            for first, second, points in crossings:
+                x, y = points[0]
+                family = _ban_for_crossing(meshes, usable, pieces, first, second, x, y)
+                fresh = family - bans
+                if fresh:
+                    bans |= fresh
+                    grown = True
+                    sketch_stats["cross_bans"] += len(fresh)
+                for key in (first, second):
+                    if parent_of.get(key) is not None:
+                        movers.add(parent_of[key])
+
+            if verbose:
+                print(f"  sketch round {_sketch_round + 1}: {len(crossings)} class "
+                      f"crossings, {len(bans)} bans, rerouting {len(movers)}")
+            if not grown:
+                break
+            chosen, stack_report = route_stack(
+                [meshes[layer] for layer in usable], sites, requests,
+                terminals=terminals, rounds=rounds, bans=frozenset(bans),
+                warm=chosen, only=movers, verbose=verbose)
+            _rebuild_pieces()
+            continue
+
+        # Primary mode: settle by cost.
+        moved_this_round: set[int] = set()
+        progressed = False
+        for first, second, points in sorted(
+                crossings, key=lambda entry: -len(entry[2])):
+            if first in moved_this_round or second in moved_this_round:
+                continue
+            outcome = _settle_crossing(board, meshes, usable, pieces, resolved,
+                                       first, second, boundary_of)
+            if outcome is None:
+                continue
+            mover_key, elements = outcome
+            resolved[mover_key] = elements
+            moved_this_round.add(first)
+            moved_this_round.add(second)
+            progressed = True
+            sketch_stats["cross_settled"] += 1
 
         if verbose:
             print(f"  sketch round {_sketch_round + 1}: {len(crossings)} class crossings, "
-                  f"{len(bans)} bans, rerouting {len(movers)}")
-        if not grown:
+                  f"{len(resolved)} settled by cost")
+        if not progressed:
             break
 
     for parent in unrouted:
@@ -1440,6 +1564,20 @@ def plan_board(board: Board, layers: list[str] | None = None,
     stranded, rescued_links = run_placement(ordered, rescue=False)
     if stranded:
         stranded, rescued_links = run_placement(list(reversed(ordered)))
+
+    # The cost arbiter answers to placement. Its settlements are priced pairwise, and a
+    # pairwise price is blind to one cost: reshaping the sketch so that a third wire has no
+    # home at all. Blame for that is genuinely untraceable -- it was measured surviving
+    # per-settlement vetoes, inverted movers, deep rip-up, and a via audition -- so the
+    # response is not cleverer blame but a guarantee: if anyone is stranded, the whole
+    # pipeline runs once more with arbitration off. A complete board outranks a shorter
+    # one, always; the arbitration is kept exactly where it keeps everyone housed.
+    if stranded and _veto_depth == 0 and not _frozen_movers:
+        if verbose:
+            print(f"  {len(stranded)} stranded after settling; "
+                  f"re-running in ban mode")
+        return plan_board(board, layers=layers, rounds=rounds, verbose=verbose,
+                          _frozen_movers=frozenset({("off",)}), _veto_depth=1)
 
     # A connection that could not be placed keeps the geometry the embedding gave it, and the
     # emitter below writes whatever a link is holding. Nothing had cleared it, so a connection
