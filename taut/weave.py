@@ -312,6 +312,43 @@ class Weave:
             self.chords.setdefault(tri, []).append(Chord(entry, exit_, key))
             self._cells.pop(tri, None)
 
+    # ------------------------------------------------------------------ revision
+
+    def snapshot(self, key: int):
+        """Everything the board holds for one wire, so it can be put back verbatim."""
+        chords = [(tri, chord) for tri, chords in self.chords.items()
+                  for chord in chords if chord.key == key]
+        records = [(pkey, fraction) for pkey, records in self.on_portal.items()
+                   for fraction, wire in records if wire == key]
+        return chords, records
+
+    def remove(self, key: int) -> None:
+        """Take one wire out of the board; everyone else's cells reopen behind it."""
+        for tri in list(self.chords):
+            kept = [chord for chord in self.chords[tri] if chord.key != key]
+            if len(kept) != len(self.chords[tri]):
+                self.chords[tri] = kept
+                self._cells.pop(tri, None)
+        for pkey in list(self.on_portal):
+            self.on_portal[pkey] = [(fraction, wire)
+                                    for fraction, wire in self.on_portal[pkey]
+                                    if wire != key]
+
+    def restore(self, key: int, snapshot) -> None:
+        chords, records = snapshot
+        for tri, chord in chords:
+            self.chords.setdefault(tri, []).append(chord)
+            self._cells.pop(tri, None)
+        for pkey, fraction in records:
+            rows = self.on_portal.setdefault(pkey, [])
+            rows.append((fraction, key))
+            rows.sort()
+
+    def chain_length(self, start, goal, crossings) -> float:
+        points = [start] + [self._lane_point(pkey, fraction)
+                            for pkey, fraction in crossings] + [goal]
+        return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+
     # ------------------------------------------------------------------ the order
 
     def order(self) -> dict[tuple[int, int], list[int]]:

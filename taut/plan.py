@@ -722,6 +722,9 @@ _TAIL_FAMILIES = True
 #: How many times the weave may promote a blocked wire to the front and start over.
 _WEAVE_RESTARTS = 20
 
+#: Rounds of take-out-and-reinsert refinement over the finished weave.
+_WEAVE_DESCENT = 4
+
 #: How many times placement may veto a settlement and send the whole pipeline round again.
 _VETO_ROUNDS = 3
 
@@ -1080,6 +1083,16 @@ def _portal_mid(mesh: Mesh, key) -> tuple[float, float]:
     return (float(pa[0]) + float(pb[0])) / 2.0, (float(pa[1]) + float(pb[1])) / 2.0
 
 
+def _route_crossings(weave, piece):
+    """The (portal, fraction) records a piece currently holds in the weave."""
+    out = []
+    for pkey in piece.route.portals:
+        fraction = next((f for f, wire in weave.on_portal.get(pkey, ())
+                         if wire == piece.key), 0.5)
+        out.append((pkey, fraction))
+    return out
+
+
 def _portal_key(key) -> tuple[int, int]:
     return int(key[0]), int(key[1])
 
@@ -1312,6 +1325,43 @@ def plan_board(board: Board, layers: list[str] | None = None,
                       f"standing down")
 
         if complete:
+            # ---- descent: re-offer every wire against the finished weave ---------------
+            #
+            # Insertion order baked arbitrary detours in: an early wire threaded around
+            # others that have since gone elsewhere. Taking one wire out and re-inserting
+            # it is sound *by construction* here -- the reinsertion cannot cross anyone --
+            # so this is a descent that only ever shortens, and it converges because each
+            # accepted move strictly reduces total chain length.
+            latest = {piece.key: piece for piece in pieces}
+            for _descent in range(_WEAVE_DESCENT):
+                improved = False
+                for piece in sorted(pieces, key=lambda item: -item.span):
+                    weave = weaves[piece.layer]
+                    head = (float(piece.pad_a.x), float(piece.pad_a.y))
+                    tail = (float(piece.pad_b.x), float(piece.pad_b.y))
+                    old_len = weave.chain_length(
+                        head, tail, [(k, f) for k, f in _route_crossings(weave, piece)])
+                    keep = weave.snapshot(piece.key)
+                    weave.remove(piece.key)
+                    got = weave.insert(piece.key, head, tail,
+                                       weave.mesh.terminals(*head),
+                                       weave.mesh.terminals(*tail),
+                                       need=piece.width / 2.0 + piece.clearance
+                                       + GUARDBAND_NM)
+                    if (got.found and weave.chain_length(head, tail, got.crossings)
+                            < old_len - 10_000.0):
+                        piece.route = Leg(layer=usable.index(piece.layer), start=head,
+                                          goal=tail, triangles=list(got.triangles),
+                                          portals=[k for k, _ in got.crossings])
+                        improved = True
+                        sketch_stats["rewoven"] = sketch_stats.get("rewoven", 0) + 1
+                    else:
+                        if got.found:
+                            weave.remove(piece.key)
+                        weave.restore(piece.key, keep)
+                if not improved:
+                    break
+
             # Per layer: portal keys are vertex pairs in each layer's own mesh, and the
             # same pair of numbers names different doorways on different layers.
             woven_order = {layer: weave.order() for layer, weave in weaves.items()}
@@ -1698,6 +1748,50 @@ def plan_board(board: Board, layers: list[str] | None = None,
                   f"re-running in ban mode")
         return plan_board(board, layers=layers, rounds=rounds, verbose=verbose,
                           _frozen_movers=frozenset({("off",)}), _veto_depth=1)
+
+    # ---- shorten what the whole board can spare ----------------------------------------
+    #
+    # With everyone placed and legal, a swap that is shorter *and* legal against the entire
+    # standing board preserves global legality outright -- placement is over, nothing after
+    # depends on it. In the tiered world this descent measured zero (every wire was already
+    # at its best response); the woven world holds wires to their corridors, so slack
+    # exists, and this is where the corridor discipline's cost is paid back.
+    if woven_order is not None and not stranded:
+        for _swap_round in range(3):
+            improved = False
+            standing = [link for link in links if link.elements and link.layer]
+            standing.sort(key=lambda l: -(_as_path(l.elements).length - l.span))
+            for link in standing:
+                before = _as_path(link.elements).length
+                if before - link.span < 100_000:
+                    continue
+                keep = (list(link.elements), link.layer, how.get(link.key, "taut"))
+                take_up(link)
+                edge_gap = board.edge_clearance_nm + link.width / 2.0 + GUARDBAND_NM
+                ends = ((float(link.pad_a.x), float(link.pad_a.y)),
+                        (float(link.pad_b.x), float(link.pad_b.y)))
+                best = None
+                for layer in candidates(link):
+                    try:
+                        found = _solve_lazily(*ends, in_the_way(layer, link, frozenset()),
+                                              boundary=boundary, boundary_gap=edge_gap)
+                    except NoPathFound:
+                        continue
+                    if best is None or found.length < best[0].length:
+                        best = (found, layer)
+                if best is not None and best[0].length < before - 10_000.0:
+                    lay(link, (best[0], best[1], "swapped"))
+                    improved = True
+                    checked["swapped"] = checked.get("swapped", 0) + 1
+                else:
+                    link.elements, link.layer = keep[0], keep[1]
+                    how[link.key] = keep[2]
+                    settled[link.layer].append(_Placed(
+                        key=link.key, net=link.net.code, path=_as_path(link.elements),
+                        halo=link.halo, half=link.width / 2.0,
+                        clearance=link.clearance))
+            if not improved:
+                break
 
     # A connection that could not be placed keeps the geometry the embedding gave it, and the
     # emitter below writes whatever a link is holding. Nothing had cleared it, so a connection
