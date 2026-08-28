@@ -64,6 +64,8 @@ class Graze:
     second: int
     gap: float
     needed: float
+    x: float = 0.0
+    y: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +163,7 @@ def check_sketch(wires: list[SketchWire], obstacles: list[Obstacle],
 
             met: list = []
             best = math.inf
+            close = (0.0, 0.0)
             pa = flat[one.key]
             pb = flat[two.key]
             for sa, sb in zip(pa, pa[1:]):
@@ -174,12 +177,15 @@ def check_sketch(wires: list[SketchWire], obstacles: list[Obstacle],
                                            sc[0], sc[1], sd[0], sd[1])
                         if gap < best:
                             best = gap
+                            close = ((sa[0] + sb[0] + sc[0] + sd[0]) / 4.0,
+                                     (sa[1] + sb[1] + sc[1] + sd[1]) / 4.0)
 
             if met:
                 crossings.append(Crossing(one.key, two.key, met[0][0], met[0][1],
                                           points=tuple(met)))
             elif best < needed:
-                grazes.append(Graze(one.key, two.key, best, needed))
+                grazes.append(Graze(one.key, two.key, best, needed,
+                                    close[0], close[1]))
 
     for wire in wires:
         halo = wire.half_width + wire.clearance + guard

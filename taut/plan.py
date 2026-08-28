@@ -44,7 +44,8 @@ from .route import (ArcTrack, RouteResult, Track, Via, _board_boundary, _convex_
 from .tangent import (NoPathFound, PathArc, PathLine, TautPath,
                       segment_to_obstacle)
 from .tangent import violated_obstacles
-from .layered import route_stack
+from .layered import Leg, route_stack
+from .weave import Weave
 from .topo import Route
 from .vias import via_sites
 from .units import CLEARANCE_MARGIN, GUARDBAND_NM
@@ -718,22 +719,34 @@ _CLIP_ROUNDS = 4
 
 _TAIL_FAMILIES = True
 
+#: How many times the weave may promote a blocked wire to the front and start over.
+_WEAVE_RESTARTS = 20
+
 #: How many times placement may veto a settlement and send the whole pipeline round again.
 _VETO_ROUNDS = 3
 
 
 def _embed_group(mesh: Mesh, group: list["_Link"], extras: dict,
-                 resolved: dict | None = None) -> None:
+                 resolved: dict | None = None, woven_order: dict | None = None) -> None:
     """Pull one layer's wires taut together, seating them against each other by rank.
 
     A wire in ``resolved`` was moved by the cost arbiter and its geometry is settled: it is
     seated -- everyone else keeps clear of where it actually is -- but never re-pulled.
+
+    A ``woven_order`` is authoritative: it came out of the weave planar by construction,
+    and the chain-adjacency guess plus its consistency pass would only disturb it.
     """
     if not group:
         return
     resolved = resolved or {}
     routes = [_as_route(link) for link in group]
-    order = _consistent(routes, _crossing_order(mesh, routes))
+    if woven_order is not None:
+        mine = {link.key for link in group}
+        order = {key: [wire for wire in wires_here if wire in mine]
+                 for key, wires_here in woven_order.items()}
+        order = {key: wires_here for key, wires_here in order.items() if wires_here}
+    else:
+        order = _consistent(routes, _crossing_order(mesh, routes))
     wires = {link.key: RbWire(key=link.key, net=link.net.code,
                               half_width=link.width / 2.0,
                               clearance=link.clearance + GUARDBAND_NM)
@@ -793,8 +806,22 @@ def _check_pieces(board: Board, meshes: dict, usable, pieces: list["_Link"],
         statics.extend(Obstacle(vertices=((via.x, via.y),), r=via.diameter / 2.0,
                                 net=via.net, label="via") for via in placed_vias)
 
-        crossed, _grazes, clipped = check_sketch(wires, statics, guard=GUARDBAND_NM)
+        crossed, grazed, clipped = check_sketch(wires, statics, guard=GUARDBAND_NM)
         crossings.extend((c.first, c.second, c.points) for c in crossed)
+
+        # A graze is a lens that has not quite happened: compatible classes, geometry not
+        # finished. Same cure -- the roomier wire is told to treat the closest-approach
+        # point of the other as copper, and the next pull spaces them.
+        for graze in grazed:
+            by_key = {link.key: link for link in group}
+            one, two = by_key.get(graze.first), by_key.get(graze.second)
+            if one is None or two is None:
+                continue
+            mover = one if one.span >= two.span else two
+            other = two if mover is one else one
+            required = (mover.width / 2.0 + other.width / 2.0
+                        + max(mover.clearance, other.clearance) + GUARDBAND_NM)
+            clips.append((mover.key, (graze.x, graze.y, required)))
         for clip in clipped:
             obstacle = statics[clip.obstacle]
             bx, by = _boundary_point(obstacle, clip.x, clip.y)
@@ -1027,28 +1054,25 @@ def _settle_crossing(board: Board, meshes: dict, usable, pieces: list["_Link"],
     return mover_key, elements
 
 
-def _lens_wrap(pieces: list["_Link"], first: int, second: int, points) -> tuple:
-    """One extra wrap point that starts unpicking a lens.
+def _lens_wraps(pieces: list["_Link"], first: int, second: int, points) -> list:
+    """The extra wrap points that unpick a lens.
 
-    The two wires cross an even number of times; between the first pair of crossings one of
-    them is holding territory the other's taut path wants. The wire with the longer span has
-    the more slack, so it gives way: it is told to keep a full spacing off the midpoint of
-    the lens, measured on the other wire, and the next embedding pulls it around instead of
-    through. One point rarely finishes the job; the clip loop it feeds converges the same
-    way lazy obstacle addition always does.
+    The two wires cross an even number of times; between each pair of crossings one of them
+    holds territory the other's taut path wants. The wire with the longer span has the more
+    slack, so it gives way -- told to keep a full spacing off every crossing point and the
+    midpoint between each pair, so the whole overlapped stretch is pushed aside at once
+    rather than one timid nudge per round.
     """
     by_key = {link.key: link for link in pieces}
     a, b = by_key[first], by_key[second]
     mover, other = (a, b) if a.span >= b.span else (b, a)
-
-    if len(points) >= 2:
-        cx = (points[0][0] + points[1][0]) / 2.0
-        cy = (points[0][1] + points[1][1]) / 2.0
-    else:
-        cx, cy = points[0]
     required = (mover.width / 2.0 + other.width / 2.0
                 + max(mover.clearance, other.clearance) + GUARDBAND_NM)
-    return mover.key, (cx, cy, required)
+
+    spots = list(points)
+    for one, two in zip(points, points[1:]):
+        spots.append(((one[0] + two[0]) / 2.0, (one[1] + two[1]) / 2.0))
+    return [(mover.key, (x, y, required)) for x, y in spots]
 
 
 def _portal_mid(mesh: Mesh, key) -> tuple[float, float]:
@@ -1189,7 +1213,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     unrouted: list[_Link] = []
     stack_report = None
     sketch_stats = {"clip_wraps": 0, "cross_settled": 0, "cross_bans": 0,
-                    "sketch_rounds": 0}
+                    "woven": 0, "sketch_rounds": 0}
 
     ban_mode = ("off",) in _frozen_movers
     bans: set = set()
@@ -1228,6 +1252,73 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 piece.route = leg
                 pieces.append(piece)
 
+    # ---- the weave: sides decided by construction --------------------------------------
+    #
+    # Wires are inserted one at a time, shortest first, into a search space where crossing
+    # a committed wire is not illegal but *unrepresentable* (taut/weave.py, taut/cells.py --
+    # the region-fan structure of the reference systems). What comes out is a crossing
+    # order on every doorway that is planar by construction, so nothing downstream has a
+    # side left to decide: settle and ban stay in the loop purely as safety nets, and
+    # placement order stops mattering. If any wire cannot be woven -- the committed board
+    # genuinely separates its ends on its assigned layer -- the weave stands down and the
+    # tiers below carry the board exactly as before.
+    woven_order: dict | None = None
+    if not ban_mode:
+        _rebuild_pieces()
+
+        # A wire that cannot be woven late may weave fine early -- its blockers then thread
+        # around *it*. Promotion restarts are the sequential router's oldest trick, and here
+        # they cost almost nothing: the weave is pure graph work, no solver in the loop. A
+        # wire that fails even when it goes first is genuinely separated, and the weave
+        # stands down to the tiers below.
+        promoted: list = []
+        complete = False
+        for _restart in range(_WEAVE_RESTARTS):
+            weaves = {layer: Weave(meshes[layer]) for layer in usable}
+            rest = sorted((piece for piece in pieces if piece not in promoted),
+                          key=lambda item: item.span)
+            failed = None
+            for piece in promoted + rest:
+                weave = weaves[piece.layer]
+                head = (float(piece.pad_a.x), float(piece.pad_a.y))
+                tail = (float(piece.pad_b.x), float(piece.pad_b.y))
+                got = weave.insert(piece.key, head, tail,
+                                   weave.mesh.terminals(*head),
+                                   weave.mesh.terminals(*tail),
+                                   need=piece.width / 2.0 + piece.clearance
+                                   + GUARDBAND_NM)
+                if not got.found:
+                    failed = piece
+                    break
+                piece.route = Leg(layer=usable.index(piece.layer), start=head,
+                                  goal=tail, triangles=list(got.triangles),
+                                  portals=[key for key, _ in got.crossings])
+            if failed is None:
+                complete = True
+                if verbose:
+                    print(f"  weave: complete, {len(promoted)} promotion(s)")
+                break
+            if failed in promoted:
+                if verbose:
+                    print(f"  weave: net {failed.net.name} has no planar corridor even "
+                          f"woven first; standing down")
+                break
+            if verbose:
+                print(f"  weave: net {failed.net.name} blocked; promoting and restarting")
+            promoted.insert(0, failed)
+        else:
+            if verbose:
+                print(f"  weave: restarts exhausted after {len(promoted)} promotions; "
+                      f"standing down")
+
+        if complete:
+            # Per layer: portal keys are vertex pairs in each layer's own mesh, and the
+            # same pair of numbers names different doorways on different layers.
+            woven_order = {layer: weave.order() for layer, weave in weaves.items()}
+            sketch_stats["woven"] = len(pieces)
+        else:
+            _rebuild_pieces()
+
     for _sketch_round in range(_SKETCH_ROUNDS):
         sketch_stats["sketch_rounds"] += 1
 
@@ -1243,7 +1334,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
         crossings = []
         for _clip_round in range(_CLIP_ROUNDS):
             for layer, group in by_layer.items():
-                _embed_group(meshes[layer], group, extras, resolved)
+                _embed_group(meshes[layer], group, extras, resolved,
+                             woven_order.get(layer) if woven_order else None)
             crossings, clips = _check_pieces(board, meshes, usable, pieces, placed_vias)
 
             # An even number of crossings between a pair is a *lens*: the classes are
@@ -1253,7 +1345,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # point of the other as copper and is pulled taut again.
             lenses = [entry for entry in crossings if len(entry[2]) % 2 == 0]
             for first, second, points in lenses:
-                clips.append(_lens_wrap(pieces, first, second, points))
+                clips.extend(_lens_wraps(pieces, first, second, points))
 
 
             if not clips:
@@ -1262,7 +1354,14 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 extras.setdefault(key, []).append(extra)
                 sketch_stats["clip_wraps"] += 1
 
-        crossings = [entry for entry in crossings if len(entry[2]) % 2 == 1]
+        if woven_order is not None:
+            # In the woven world parity has done its work: whatever the clip loop could
+            # not finish -- odd or even -- goes to the cost arbiter, whose answer is legal
+            # against everything standing. The wrap dance above was measured oscillating
+            # (2 crossings, then 14, then 2) on exactly one stubborn pair.
+            pass
+        else:
+            crossings = [entry for entry in crossings if len(entry[2]) % 2 == 1]
         if not crossings:
             break
 
@@ -1405,9 +1504,15 @@ def plan_board(board: Board, layers: list[str] | None = None,
             taut = _as_path(link.elements)
             if (not violated_obstacles(taut, in_the_way(link.layer, link, ignore))
                     and _clears_boundary(taut, boundary, edge_gap)):
-                # Legal is not the same as good. A taut path that wanders well past its own
-                # span is worth measuring against the exact solver, which answers a different
-                # question -- shortest ignoring topology -- and sometimes wins outright.
+                # In the woven world the taut geometry is *jointly* legal -- the whole
+                # sketch was refereed as one object -- and a solver path taken here for
+                # being a hair shorter re-creates exactly the conflicts the weave removed:
+                # measured, the last wire to place paid for all 27 substitutions. Joint
+                # legality outranks individual length, so a legal taut path is kept.
+                if woven_order is not None:
+                    return taut, link.layer, "taut"
+                # Otherwise, legal is not the same as good: a taut path that wanders well
+                # past its own span is worth measuring against the exact solver.
                 if taut.length <= link.span * _KEEP_WITHOUT_ASKING:
                     return taut, link.layer, "taut"
                 best = (taut, link.layer, "taut")
@@ -1574,6 +1679,21 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # one, always; the arbitration is kept exactly where it keeps everyone housed.
     if stranded and _veto_depth == 0 and not _frozen_movers:
         if verbose:
+            for link in stranded:
+                print(f"  stranded: net {link.net.name} span {link.span / 1e6:.2f} mm "
+                      f"layer {link.layer}: {link.reason}")
+                if link.elements:
+                    taut_path = _as_path(link.elements)
+                    naming = {}
+                    for placed_row in settled[link.layer]:
+                        for ob in _path_obstacles(placed_row.path, 1.0, placed_row.net):
+                            naming[id(ob)] = placed_row.net
+                    hits = []
+                    everything = in_the_way(link.layer, link, frozenset())
+                    for slot in violated_obstacles(taut_path, everything):
+                        ob = everything[slot]
+                        hits.append(naming.get(id(ob), getattr(ob, "label", "?")))
+                    print(f"    taut blocked by: {hits[:10]}")
             print(f"  {len(stranded)} stranded after settling; "
                   f"re-running in ban mode")
         return plan_board(board, layers=layers, rounds=rounds, verbose=verbose,
