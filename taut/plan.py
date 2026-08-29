@@ -735,7 +735,10 @@ def _settle_budget(pieces: int) -> int:
 
 #: How many times the weave may promote a blocked wire to the front and start over.
 _WEAVE_RESTARTS = 20
-_WEAVE_VETOES = 8
+#: One veto per feedback round, and each round was measured at ~30 seconds on the
+#: 630-pad board -- the budget is generous because convergence is one separation at a
+#: time, and the alternative to another round is standing down the whole weave.
+_WEAVE_VETOES = 48
 
 #: Rounds of take-out-and-reinsert refinement over the finished weave.
 _WEAVE_DESCENT = 4
