@@ -168,8 +168,13 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             start_tris: list[list[int]], goal_tris: list[list[int]], net: int,
             price, via_cost: float, prefer: int | None = None,
             bias: float = 1.0, bans: frozenset = frozenset(),
-            avoid: tuple = (), node_limit: int = 600_000):
-    """A* over (layer, triangle), stepping doorway to doorway and layer to layer."""
+            avoid: tuple = (), node_limit: int = 600_000,
+            veto: frozenset = frozenset()):
+    """A* over (layer, triangle), stepping doorway to doorway and layer to layer.
+
+    ``veto`` lists layers this connection may not touch at all -- the weave's feedback
+    when a layer that looked cheap turns out to have no planar corridor on it.
+    """
     goals = {(layer, tri) for layer, tris in enumerate(goal_tris) for tri in tris}
     if not goals or not any(start_tris):
         return None
@@ -181,6 +186,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
     order = ([prefer] if prefer is not None else []) + [
         index for index in range(len(meshes)) if index != prefer]
     for layer in order:
+        if layer in veto:
+            continue
         if (net, layer, -1, frozenset()) in bans:
             # The straight line is clear of copper but crosses another wire; this net has
             # to route properly on this layer, doorway by doorway.
@@ -217,6 +224,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
               charge: float, extra: float) -> None:
         mx, my = where(state[0], state[2])
         step = math.hypot(mx - px, my - py) * charge + extra
+        if state[0] in veto:
+            return
         rest = math.hypot(mx - gx, my - gy)
         if (state[0], state[1]) in goals:
             step += rest
@@ -227,7 +236,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             came[state] = previous
             heapq.heappush(heap, (total + rest, total, state))
 
-    origins = {(layer, tri) for layer, tris in enumerate(start_tris) for tri in tris}
+    origins = {(layer, tri) for layer, tris in enumerate(start_tris) for tri in tris
+               if layer not in veto}
     for layer, tri in sorted(origins):
         _expand(meshes, sites, by_triangle, layer, tri, origins, price, net, via_cost,
                 lambda state, charge, extra, _l=layer, _t=tri: relax(
@@ -389,7 +399,7 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 present: float = 0.6, bias: float = OFF_PREFERENCE,
                 bans: frozenset = frozenset(), warm: list | None = None,
                 only: set | None = None, avoid_for: dict | None = None,
-                verbose: bool = False):
+                veto_for: dict | None = None, verbose: bool = False):
     """Choose a route for every connection at once, over the whole stack.
 
     ``requests`` are ``(key, net, start, goal, preferred_layer?)``; ``terminals(point)``
@@ -461,7 +471,8 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
             found = _search(meshes, sites, by_triangle, route.start, route.goal,
                             reach(route.start), reach(route.goal), route.net,
                             price, via_cost, wanted.get(route.key), bias, bans,
-                            tuple((avoid_for or {}).get(route.key, ())))
+                            tuple((avoid_for or {}).get(route.key, ())),
+                            veto=frozenset((veto_for or {}).get(route.key, ())))
             origin, walk = found if found else (None, None)
             _rebuild(route, origin, walk, sites)
             for resource in route.uses():

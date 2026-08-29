@@ -733,6 +733,7 @@ def _settle_budget(pieces: int) -> int:
 
 #: How many times the weave may promote a blocked wire to the front and start over.
 _WEAVE_RESTARTS = 20
+_WEAVE_VETOES = 8
 
 #: Rounds of take-out-and-reinsert refinement over the finished weave.
 _WEAVE_DESCENT = 4
@@ -1445,52 +1446,87 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # tiers below carry the board exactly as before.
     woven_order: dict | None = None
     if not ban_mode:
-        _rebuild_pieces()
-
         # A wire that cannot be woven late may weave fine early -- its blockers then thread
         # around *it*. Promotion restarts are the sequential router's oldest trick, and here
         # they cost almost nothing: the weave is pure graph work, no solver in the loop. A
-        # wire that fails even when it goes first is genuinely separated, and the weave
-        # stands down to the tiers below.
-        promoted: list = []
+        # wire that fails even when it goes first is genuinely separated *on the layer the
+        # stack chose for it* -- which is a fact about the stack's choice, not the board, so
+        # it goes back to the stack as a layer veto and the connection is re-dealt before
+        # the weave gives up for real.
+        layer_vetoes: dict[int, set[int]] = {}
         complete = False
-        for _restart in range(_WEAVE_RESTARTS):
-            weaves = {layer: Weave(meshes[layer]) for layer in usable}
-            rest = sorted((piece for piece in pieces if piece not in promoted),
-                          key=lambda item: item.span)
-            failed = None
-            for piece in promoted + rest:
-                weave = weaves[piece.layer]
-                head = (float(piece.pad_a.x), float(piece.pad_a.y))
-                tail = (float(piece.pad_b.x), float(piece.pad_b.y))
-                got = weave.insert(piece.key, head, tail,
-                                   weave.mesh.terminals(*head),
-                                   weave.mesh.terminals(*tail),
-                                   need=piece.width / 2.0 + piece.clearance
-                                   + GUARDBAND_NM)
-                if not got.found:
-                    failed = piece
+        for _feedback in range(1 + _WEAVE_VETOES):
+            _rebuild_pieces()
+            promoted = []
+            separated = None
+            for _restart in range(_WEAVE_RESTARTS):
+                weaves = {layer: Weave(meshes[layer]) for layer in usable}
+                rest = sorted((piece for piece in pieces if piece not in promoted),
+                              key=lambda item: item.span)
+                failed = None
+                for piece in promoted + rest:
+                    weave = weaves[piece.layer]
+                    head = (float(piece.pad_a.x), float(piece.pad_a.y))
+                    tail = (float(piece.pad_b.x), float(piece.pad_b.y))
+                    got = weave.insert(piece.key, head, tail,
+                                       weave.mesh.terminals(*head),
+                                       weave.mesh.terminals(*tail),
+                                       need=piece.width / 2.0 + piece.clearance
+                                       + GUARDBAND_NM)
+                    if not got.found:
+                        failed = piece
+                        break
+                    piece.route = Leg(layer=usable.index(piece.layer), start=head,
+                                      goal=tail, triangles=list(got.triangles),
+                                      portals=[key for key, _ in got.crossings])
+                if failed is None:
+                    complete = True
+                    if verbose:
+                        print(f"  weave: complete, {len(promoted)} promotion(s)")
                     break
-                piece.route = Leg(layer=usable.index(piece.layer), start=head,
-                                  goal=tail, triangles=list(got.triangles),
-                                  portals=[key for key, _ in got.crossings])
-            if failed is None:
-                complete = True
+                if failed in promoted:
+                    separated = failed
+                    break
                 if verbose:
-                    print(f"  weave: complete, {len(promoted)} promotion(s)")
-                break
-            if failed in promoted:
+                    print(f"  weave: net {failed.net.name} blocked; promoting and "
+                          f"restarting")
+                promoted.insert(0, failed)
+            else:
                 if verbose:
-                    print(f"  weave: net {failed.net.name} has no planar corridor even "
-                          f"woven first; standing down")
+                    print(f"  weave: restarts exhausted after {len(promoted)} "
+                          f"promotions; standing down")
+            if complete or separated is None:
                 break
+
+            # The piece failed with the whole layer to itself: its ends really are
+            # separated there. Veto the layer for that connection and let the stack
+            # repair-route just this one against everything else where it stands.
+            key = separated.parent
+            layer_index = usable.index(separated.layer)
+            vetoed = layer_vetoes.setdefault(key, set())
+            if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+                if verbose:
+                    print(f"  weave: net {separated.net.name} has no planar corridor "
+                          f"on any layer left to it; standing down")
+                break
+            vetoed.add(layer_index)
             if verbose:
-                print(f"  weave: net {failed.net.name} blocked; promoting and restarting")
-            promoted.insert(0, failed)
+                print(f"  weave: net {separated.net.name} separated on "
+                      f"{separated.layer}; vetoing that layer and re-dealing")
+            redealt, _ = route_stack(
+                [meshes[layer] for layer in usable], sites, requests,
+                terminals=terminals, rounds=4, warm=chosen, only={key},
+                veto_for=layer_vetoes)
+            fresh = next((r for r in redealt if r.key == key), None)
+            if fresh is None or not fresh.found:
+                if verbose:
+                    print(f"  weave: net {separated.net.name} unroutable off "
+                          f"{separated.layer}; standing down")
+                break
+            chosen = redealt
         else:
             if verbose:
-                print(f"  weave: restarts exhausted after {len(promoted)} promotions; "
-                      f"standing down")
+                print("  weave: veto budget exhausted; standing down")
 
         if complete:
             # ---- descent: re-offer every wire against the finished weave ---------------
