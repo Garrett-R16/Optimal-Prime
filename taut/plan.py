@@ -38,7 +38,7 @@ from .rubberband import Wire as RbWire, _segments_cross, rubberband, to_geometry
 from .rubberband import spacing_between
 from .mesh import Mesh, build_mesh
 from .obstacles import Obstacle, pad_obstacle
-from .route import (ArcTrack, RouteResult, Track, Via, _board_boundary, _convex_hull,
+from .route import (ArcTrack, Pour, RouteResult, Track, Via, _board_boundary, _convex_hull,
                     _copper_shape_obstacles, _path_obstacles, _solve_lazily,
                     MIN_PIECE_NM, MIN_SAGITTA_NM)
 from .tangent import (NoPathFound, PathArc, PathLine, TautPath,
@@ -55,7 +55,7 @@ __all__ = ["plan_board"]
 #: A funnel path no longer than this multiple of its straight-line span is kept without
 #: consulting the exact solver. Above it, both are computed and the shorter wins -- the check
 #: is cheap next to a wasted millimetre of copper and the space it denies everything after it.
-_KEEP_WITHOUT_ASKING = 1.0
+_KEEP_WITHOUT_ASKING = 1.15
 
 #: How many times to re-read the crossing order off the geometry and embed again.
 _SEATING_PASSES = 8
@@ -719,6 +719,18 @@ _CLIP_ROUNDS = 4
 
 _TAIL_FAMILIES = True
 
+#: How many crossings the cost arbiter prices per sketch round. Each costs two exact-solver
+#: runs against the whole sketch; past this many, the check phase is the cheaper referee.
+#: On large boards a single solve was profiled near a minute, so the budget shrinks with
+#: the wire count -- the arbiter keeps the worst tangles, the check phase gets the rest.
+_SETTLE_BUDGET = 60
+
+
+def _settle_budget(pieces: int) -> int:
+    if pieces > 300:
+        return 0
+    return max(4, min(_SETTLE_BUDGET, 1200 // max(pieces, 1)))
+
 #: How many times the weave may promote a blocked wire to the front and start over.
 _WEAVE_RESTARTS = 20
 
@@ -1099,6 +1111,7 @@ def _portal_key(key) -> tuple[int, int]:
 
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
+               pour_nets: tuple = (),
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1109,7 +1122,14 @@ def plan_board(board: Board, layers: list[str] | None = None,
     polygon = board_polygon(board)
 
     links: list[_Link] = []
+    poured = []
     for net in board.routable:
+        if net.name in pour_nets:
+            # A plane net: real two-layer boards serve it with a copper pour, not with a
+            # hundred point-to-point tracks crossing everything. Its pads stay as
+            # obstacles; its connectivity comes from the zone written at the end.
+            poured.append(net)
+            continue
         pads = list(net.pads)
         netclass = board.netclass_for(net.name)
         width = float(netclass.track_width_nm)
@@ -1369,7 +1389,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
         else:
             _rebuild_pieces()
 
-    for _sketch_round in range(_SKETCH_ROUNDS):
+    sketch_round_cap = _SKETCH_ROUNDS if len(links) <= 150 else 1
+    for _sketch_round in range(sketch_round_cap):
         sketch_stats["sketch_rounds"] += 1
 
         # A via splits a connection into pieces that are each one net, one layer, two
@@ -1454,10 +1475,19 @@ def plan_board(board: Board, layers: list[str] | None = None,
         # Primary mode: settle by cost.
         moved_this_round: set[int] = set()
         progressed = False
+        settled_this_round = 0
         for first, second, points in sorted(
                 crossings, key=lambda entry: -len(entry[2])):
+            if settled_this_round >= _settle_budget(len(pieces)):
+                # The arbiter prices with the exact solver, and on a saturated board an
+                # unbounded pricing pass was profiled at hours. The budget caps pricing
+                # ATTEMPTS -- a failed settle costs the same solver time as a success --
+                # and whatever exceeds it is left for the check phase, which resolves
+                # per wire and cheaper.
+                break
             if first in moved_this_round or second in moved_this_round:
                 continue
+            settled_this_round += 1
             outcome = _settle_crossing(board, meshes, usable, pieces, resolved,
                                        first, second, boundary_of)
             if outcome is None:
@@ -1720,6 +1750,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     if stranded:
         stranded, rescued_links = run_placement(list(reversed(ordered)))
 
+    # (recursion carries the pour set through)
     # The cost arbiter answers to placement. Its settlements are priced pairwise, and a
     # pairwise price is blind to one cost: reshaping the sketch so that a third wire has no
     # home at all. Blame for that is genuinely untraceable -- it was measured surviving
@@ -1727,7 +1758,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # response is not cleverer blame but a guarantee: if anyone is stranded, the whole
     # pipeline runs once more with arbitration off. A complete board outranks a shorter
     # one, always; the arbitration is kept exactly where it keeps everyone housed.
-    if stranded and _veto_depth == 0 and not _frozen_movers:
+    if stranded and _veto_depth == 0 and not _frozen_movers and len(links) <= 150:
         if verbose:
             for link in stranded:
                 print(f"  stranded: net {link.net.name} span {link.span / 1e6:.2f} mm "
@@ -1756,7 +1787,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # depends on it. In the tiered world this descent measured zero (every wire was already
     # at its best response); the woven world holds wires to their corridors, so slack
     # exists, and this is where the corridor discipline's cost is paid back.
-    if woven_order is not None and not stranded:
+    if woven_order is not None and not stranded and len(links) <= 150:
         for _swap_round in range(3):
             improved = False
             standing = [link for link in links if link.elements and link.layer]
@@ -1848,6 +1879,10 @@ def plan_board(board: Board, layers: list[str] | None = None,
                            diameter_nm=int(via.diameter), drill_nm=int(via.drill))
                        for via in placed_vias if whole.get(via.owner))
 
+    for net in poured:
+        result.pours.append(Pour(net=net.code, name=net.name,
+                                 layer=usable[-1], polygon=tuple(polygon)))
+
     result.stats.update({
         "connections": len(whole),
         "routed": len(result.routed),
@@ -1856,6 +1891,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         "arcs": result.arc_count,
         "length_mm": round(result.total_length_nm / 1e6, 2),
         "vias": len(result.vias),
+        "poured": [net.name for net in poured],
         **{f"topo_{k}": v for k, v in topo_stats.items()},
         **{f"embed_{k}": v for k, v in checked.items()},
     })

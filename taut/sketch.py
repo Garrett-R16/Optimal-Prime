@@ -22,6 +22,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 from .obstacles import Obstacle
 from .tangent import PathArc, PathLine, TautPath, arc_to_obstacle, segment_to_obstacle
 
@@ -131,6 +133,83 @@ def _segment_gap(ax, ay, bx, by, cx, cy, dx, dy) -> float:
                point_seg(cx, cy, ax, ay, bx, by), point_seg(dx, dy, ax, ay, bx, by))
 
 
+def _pair_check(pa: "np.ndarray", pb: "np.ndarray", needed: float):
+    """All crossings between two polylines, and their closest approach, vectorised.
+
+    The scalar double loop was measured to consume hours alone on a 498-wire board -- a
+    quadratic referee is tolerable only when its inner product is a handful of numpy
+    broadcasts. Same arithmetic as the scalar version, wire-pair at a time: bounding-box
+    reject per segment pair, orientation tests for the crossings, and point-to-segment
+    distances for the gap.
+    """
+    a0, a1 = pa[:-1], pa[1:]
+    b0, b1 = pb[:-1], pb[1:]
+
+    # segment-pair bounding-box rejection
+    a_lo = np.minimum(a0, a1)[:, None, :]
+    a_hi = np.maximum(a0, a1)[:, None, :]
+    b_lo = np.minimum(b0, b1)[None, :, :]
+    b_hi = np.maximum(b0, b1)[None, :, :]
+    near = ~((a_hi[..., 0] + needed < b_lo[..., 0])
+             | (b_hi[..., 0] + needed < a_lo[..., 0])
+             | (a_hi[..., 1] + needed < b_lo[..., 1])
+             | (b_hi[..., 1] + needed < a_lo[..., 1]))
+    rows, cols = np.nonzero(near)
+    if rows.size == 0:
+        return [], math.inf, (0.0, 0.0)
+
+    sa0, sa1 = a0[rows], a1[rows]
+    sb0, sb1 = b0[cols], b1[cols]
+
+    def wind(p, q, r):
+        return ((q[:, 0] - p[:, 0]) * (r[:, 1] - p[:, 1])
+                - (q[:, 1] - p[:, 1]) * (r[:, 0] - p[:, 0]))
+
+    d1 = wind(sb0, sb1, sa0)
+    d2 = wind(sb0, sb1, sa1)
+    d3 = wind(sa0, sa1, sb0)
+    d4 = wind(sa0, sa1, sb1)
+    crossing = ((d1 > 0) != (d2 > 0)) & ((d3 > 0) != (d4 > 0))
+
+    met = []
+    if crossing.any():
+        ca0, ca1 = sa0[crossing], sa1[crossing]
+        cb0, cb1 = sb0[crossing], sb1[crossing]
+        denom = ((ca1[:, 0] - ca0[:, 0]) * (cb1[:, 1] - cb0[:, 1])
+                 - (ca1[:, 1] - ca0[:, 1]) * (cb1[:, 0] - cb0[:, 0]))
+        safe = np.abs(denom) > 1e-12
+        t = np.zeros_like(denom)
+        t[safe] = (((cb0[:, 0] - ca0[:, 0]) * (cb1[:, 1] - cb0[:, 1])
+                    - (cb0[:, 1] - ca0[:, 1]) * (cb1[:, 0] - cb0[:, 0]))[safe]
+                   / denom[safe])
+        xs = ca0[:, 0] + t * (ca1[:, 0] - ca0[:, 0])
+        ys = ca0[:, 1] + t * (ca1[:, 1] - ca0[:, 1])
+        met = [(float(x), float(y)) for x, y, ok in zip(xs, ys, safe) if ok]
+        if met:
+            return met, 0.0, met[0]
+
+    def point_to_segments(points, seg_from, seg_to):
+        d = seg_to - seg_from
+        span = (d * d).sum(axis=1)
+        span[span < 1e-18] = 1e-18
+        t = ((points - seg_from) * d).sum(axis=1) / span
+        t = np.clip(t, 0.0, 1.0)
+        foot = seg_from + t[:, None] * d
+        return np.hypot(*(points - foot).T)
+
+    gaps = np.minimum.reduce([
+        point_to_segments(sa0, sb0, sb1),
+        point_to_segments(sa1, sb0, sb1),
+        point_to_segments(sb0, sa0, sa1),
+        point_to_segments(sb1, sa0, sa1),
+    ])
+    slot = int(np.argmin(gaps))
+    best = float(gaps[slot])
+    close = (float((sa0[slot, 0] + sa1[slot, 0] + sb0[slot, 0] + sb1[slot, 0]) / 4.0),
+             float((sa0[slot, 1] + sa1[slot, 1] + sb0[slot, 1] + sb1[slot, 1]) / 4.0))
+    return [], best, close
+
+
 # --------------------------------------------------------------------------- the check
 
 def check_sketch(wires: list[SketchWire], obstacles: list[Obstacle],
@@ -146,6 +225,7 @@ def check_sketch(wires: list[SketchWire], obstacles: list[Obstacle],
 
     flat = {wire.key: _points(wire.path) for wire in wires}
     boxes = {wire.key: _bounds(flat[wire.key]) for wire in wires if flat[wire.key]}
+    arrays = {key: np.asarray(points, dtype=float) for key, points in flat.items()}
 
     ordered = sorted(wires, key=lambda wire: wire.key)
     for index, one in enumerate(ordered):
@@ -161,24 +241,7 @@ def check_sketch(wires: list[SketchWire], obstacles: list[Obstacle],
                     or a[3] + needed < b[1] or b[3] + needed < a[1]):
                 continue
 
-            met: list = []
-            best = math.inf
-            close = (0.0, 0.0)
-            pa = flat[one.key]
-            pb = flat[two.key]
-            for sa, sb in zip(pa, pa[1:]):
-                for sc, sd in zip(pb, pb[1:]):
-                    hit = _cross(sa[0], sa[1], sb[0], sb[1], sc[0], sc[1], sd[0], sd[1])
-                    if hit is not None:
-                        met.append(hit)
-                        continue
-                    if not met:
-                        gap = _segment_gap(sa[0], sa[1], sb[0], sb[1],
-                                           sc[0], sc[1], sd[0], sd[1])
-                        if gap < best:
-                            best = gap
-                            close = ((sa[0] + sb[0] + sc[0] + sd[0]) / 4.0,
-                                     (sa[1] + sb[1] + sc[1] + sd[1]) / 4.0)
+            met, best, close = _pair_check(arrays[one.key], arrays[two.key], needed)
 
             if met:
                 crossings.append(Crossing(one.key, two.key, met[0][0], met[0][1],
