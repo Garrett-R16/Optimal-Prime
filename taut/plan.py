@@ -47,7 +47,7 @@ from .tangent import violated_obstacles
 from .layered import Leg, route_stack
 from .weave import Weave
 from .topo import Route
-from .vias import via_sites
+from .vias import Site, via_sites
 from .units import CLEARANCE_MARGIN, GUARDBAND_NM
 
 __all__ = ["plan_board"]
@@ -1115,6 +1115,75 @@ def _portal_key(key) -> tuple[int, int]:
     return int(key[0]), int(key[1])
 
 
+def _pocket_sites(board: Board, meshes: dict, usable, polygon, piece,
+                  start_index: int, reach: float) -> list:
+    """Via sites tangent to a separated leg's pads: the escape a sealed pocket needs.
+
+    Stock sites are centroids of free triangles, and a pocket tight enough to seal a pad
+    rarely owns a centroid with via room -- but tangent to the pad there is often exactly
+    one via of space, the spot a hand router reaches for. Conjuring those spots as sites
+    and letting the stack negotiate for them keeps the mechanism honest: nothing is
+    placed here, only made *possible*.
+    """
+    found = []
+    count = len(polygon)
+    for pad in (piece.pad_a, piece.pad_b):
+        if isinstance(pad, _ViaPoint):
+            continue
+        hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+        spin = math.radians(pad.angle)
+        cos_s, sin_s = math.cos(spin), math.sin(spin)
+
+        def support(dx: float, dy: float) -> float:
+            if pad.shape == "circle":
+                return max(hx, hy)
+            along = abs(dx * cos_s + dy * sin_s)
+            across = abs(-dx * sin_s + dy * cos_s)
+            if pad.shape == "oval" and hx != hy:
+                long_half, short_half = max(hx, hy), min(hx, hy)
+                axis = along if hx >= hy else across
+                return (long_half - short_half) * axis + short_half
+            return hx * along + hy * across
+
+        def room(x: float, y: float) -> bool:
+            if not _inside(polygon, x, y):
+                return False
+            for i in range(count):
+                ax, ay = polygon[i]
+                bx, by = polygon[(i + 1) % count]
+                dx, dy = bx - ax, by - ay
+                span = dx * dx + dy * dy or 1.0
+                t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / span))
+                if math.hypot(x - (ax + t * dx), y - (ay + t * dy)) < reach:
+                    return False
+            for layer in usable:
+                for ob in meshes[layer].obstacles:
+                    if ob.net == piece.net.code:
+                        continue
+                    if ob.distance_to_point(x, y) - ob.r < reach:
+                        return False
+            return True
+
+        kept = 0
+        for step in range(16):
+            angle = step * math.tau / 16.0
+            dx, dy = math.cos(angle), math.sin(angle)
+            base = support(dx, dy) + reach + 50_000.0
+            for k in range(3):
+                dist = base + k * 200_000.0
+                x, y = pad.x + dist * dx, pad.y + dist * dy
+                if room(x, y):
+                    tris = tuple(meshes[layer].triangle_at(x, y) for layer in usable)
+                    if all(t >= 0 for t in tris):
+                        found.append(Site(index=start_index + len(found), x=x, y=y,
+                                          triangles=tris))
+                        kept += 1
+                    break
+            if kept >= 6:
+                break
+    return found
+
+
 def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
                       usable, polygon, pour_layers: dict) -> tuple[int, int]:
     """A via beside every poured-net pad that cannot touch the pour layer.
@@ -1474,6 +1543,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         # the weave gives up for real.
         layer_vetoes: dict[int, set[int]] = {}
         site_vetoes: dict[int, set[int]] = {}
+        pocket_gifted: set[int] = set()
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
         # still needs it after an unrelated connection moved its via. Pieces are remade
@@ -1546,6 +1616,23 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 if verbose:
                     print(f"  weave: net {separated.net.name} separated at via "
                           f"site(s) {sorted(blamed)}; banning and re-dealing")
+            elif key not in pocket_gifted:
+                # Pad-to-pad separation: the pad's own pocket has no stock via site, so
+                # conjure tangent ones and let the stack negotiate an escape.
+                pocket_gifted.add(key)
+                gifts = _pocket_sites(board, meshes, usable, polygon, separated,
+                                      len(sites), via_radius + clearance)
+                if gifts:
+                    sites.extend(gifts)
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} separated pad to "
+                              f"pad; gifting {len(gifts)} tangent via site(s) and "
+                              f"re-dealing")
+                else:
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} separated pad to "
+                              f"pad and its pockets fit no via; standing down")
+                    break
             else:
                 layer_index = usable.index(separated.layer)
                 vetoed = layer_vetoes.setdefault(key, set())
