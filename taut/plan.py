@@ -156,6 +156,8 @@ class _ViaPoint:
     owner: int
     diameter: int
     drill: int
+    #: index into the stack's site list, so a weave failure can name the site it blames
+    site: int = -1
 
     def on_layer(self, _layer: str) -> bool:
         return True
@@ -1127,7 +1129,8 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
         for pad in net.pads:
             r = math.hypot(pad.size_x, pad.size_y) / 2.0
             layer = None if pad.drill_nm else (pad.layers[0] if pad.layers else None)
-            pad_discs.append((layer, pad.net, float(pad.x), float(pad.y), r))
+            pad_discs.append((layer, pad.net, float(pad.x), float(pad.y), r,
+                              pad.drill_nm / 2.0))
     segments: dict[str, list[tuple[int, float, float, float, float, float]]] = {}
     for track in result.tracks:
         rows = segments.setdefault(track.layer, [])
@@ -1137,7 +1140,8 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
             rows.append((track.net, track.xm, track.ym, track.x2, track.y2, half))
         else:
             rows.append((track.net, track.x1, track.y1, track.x2, track.y2, half))
-    via_discs = [(via.net, float(via.x), float(via.y), via.diameter_nm / 2.0)
+    via_discs = [(via.net, float(via.x), float(via.y), via.diameter_nm / 2.0,
+                  via.drill_nm / 2.0)
                  for via in result.vias]
 
     def seg_gap(px, py, x1, y1, x2, y2) -> float:
@@ -1166,12 +1170,19 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
                 bx, by = polygon[(i + 1) % count]
                 if seg_gap(x, y, ax, ay, bx, by) < edge_keep:
                     return False
-            for layer, code, px, py, r in pad_discs:
+            hole_keep = max(clr, 250_000.0)
+            drill_r = cls.via_drill_nm / 2.0
+            for layer, code, px, py, r, hole_r in pad_discs:
+                gap = math.hypot(px - x, py - y)
+                # Drills do not care about nets: a hole too near another hole is a
+                # fabrication defect on the same net as surely as across nets.
+                if hole_r and gap < hole_r + drill_r + hole_keep:
+                    return False
                 if code == net.code:
                     continue
                 if layer is not None and layer not in (pad_layer, pour_layer):
                     continue
-                if math.hypot(px - x, py - y) < r + via_r + clr:
+                if gap < r + via_r + clr:
                     return False
             for layer in (pad_layer, pour_layer):
                 for code, x1, y1, x2, y2, half in segments.get(layer, ()):
@@ -1179,13 +1190,16 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
                         continue
                     if seg_gap(x, y, x1, y1, x2, y2) < half + via_r + clr:
                         return False
-            for code, vx, vy, r in via_discs:
-                if math.hypot(vx - x, vy - y) < r + via_r + clr:
+            for code, vx, vy, r, hole_r in via_discs:
+                gap = math.hypot(vx - x, vy - y)
+                if gap < hole_r + drill_r + hole_keep:
+                    return False
+                if code != net.code and gap < r + via_r + clr:
                     return False
             return True
 
         def stub_clear(pad, x: float, y: float, pad_layer: str) -> bool:
-            for layer, code, px, py, r in pad_discs:
+            for layer, code, px, py, r, _hole_r in pad_discs:
                 if code == net.code:
                     continue
                 if layer is not None and layer != pad_layer:
@@ -1245,7 +1259,8 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
                                                x1=pad.x, y1=pad.y,
                                                x2=int(round(x)), y2=int(round(y)),
                                                width_nm=cls.track_width_nm))
-                    via_discs.append((net.code, x, y, via_r))
+                    via_discs.append((net.code, x, y, via_r,
+                                      cls.via_drill_nm / 2.0))
                     segments.setdefault(pad_layer, []).append(
                         (net.code, pad.x, pad.y, x, y, stub_half))
                     stitched += 1
@@ -1420,7 +1435,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 point = _ViaPoint(x=site.x, y=site.y, net=parent.net.code,
                                   owner=parent.key,
                                   diameter=board.netclass_for(parent.net.name).via_diameter_nm,
-                                  drill=board.netclass_for(parent.net.name).via_drill_nm)
+                                  drill=board.netclass_for(parent.net.name).via_drill_nm,
+                                  site=index)
                 placed_vias.append(point)
                 stops.append(point)
             stops.append(_pad_like(parent.pad_b))
@@ -1454,6 +1470,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         # it goes back to the stack as a layer veto and the connection is re-dealt before
         # the weave gives up for real.
         layer_vetoes: dict[int, set[int]] = {}
+        site_vetoes: dict[int, set[int]] = {}
         complete = False
         for _feedback in range(1 + _WEAVE_VETOES):
             _rebuild_pieces()
@@ -1499,24 +1516,35 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 break
 
             # The piece failed with the whole layer to itself: its ends really are
-            # separated there. Veto the layer for that connection and let the stack
-            # repair-route just this one against everything else where it stands.
+            # separated there. If an end is a via, the stack parked that via somewhere
+            # the weave cannot leave with a full lane -- blame the site, ban it for this
+            # connection, and re-deal. Only when the failing leg runs pad to pad is the
+            # layer itself out of corridors, and the veto escalates to the whole layer.
             key = separated.parent
-            layer_index = usable.index(separated.layer)
-            vetoed = layer_vetoes.setdefault(key, set())
-            if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+            blamed = {end.site for end in (separated.pad_a, separated.pad_b)
+                      if isinstance(end, _ViaPoint) and end.site >= 0}
+            banned_sites = site_vetoes.setdefault(key, set())
+            if blamed - banned_sites:
+                banned_sites |= blamed
                 if verbose:
-                    print(f"  weave: net {separated.net.name} has no planar corridor "
-                          f"on any layer left to it; standing down")
-                break
-            vetoed.add(layer_index)
-            if verbose:
-                print(f"  weave: net {separated.net.name} separated on "
-                      f"{separated.layer}; vetoing that layer and re-dealing")
+                    print(f"  weave: net {separated.net.name} separated at via "
+                          f"site(s) {sorted(blamed)}; banning and re-dealing")
+            else:
+                layer_index = usable.index(separated.layer)
+                vetoed = layer_vetoes.setdefault(key, set())
+                if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} has no planar "
+                              f"corridor on any layer left to it; standing down")
+                    break
+                vetoed.add(layer_index)
+                if verbose:
+                    print(f"  weave: net {separated.net.name} separated on "
+                          f"{separated.layer}; vetoing that layer and re-dealing")
             redealt, _ = route_stack(
                 [meshes[layer] for layer in usable], sites, requests,
                 terminals=terminals, rounds=4, warm=chosen, only={key},
-                veto_for=layer_vetoes)
+                veto_for=layer_vetoes, site_veto_for=site_vetoes)
             fresh = next((r for r in redealt if r.key == key), None)
             if fresh is None or not fresh.found:
                 if verbose:

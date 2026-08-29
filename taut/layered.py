@@ -169,7 +169,7 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             price, via_cost: float, prefer: int | None = None,
             bias: float = 1.0, bans: frozenset = frozenset(),
             avoid: tuple = (), node_limit: int = 600_000,
-            veto: frozenset = frozenset()):
+            veto: frozenset = frozenset(), site_veto: frozenset = frozenset()):
     """A* over (layer, triangle), stepping doorway to doorway and layer to layer.
 
     ``veto`` lists layers this connection may not touch at all -- the weave's feedback
@@ -225,6 +225,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
         mx, my = where(state[0], state[2])
         step = math.hypot(mx - px, my - py) * charge + extra
         if state[0] in veto:
+            return
+        if state[2][0] == "v" and state[2][1] in site_veto:
             return
         rest = math.hypot(mx - gx, my - gy)
         if (state[0], state[1]) in goals:
@@ -399,7 +401,8 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 present: float = 0.6, bias: float = OFF_PREFERENCE,
                 bans: frozenset = frozenset(), warm: list | None = None,
                 only: set | None = None, avoid_for: dict | None = None,
-                veto_for: dict | None = None, verbose: bool = False):
+                veto_for: dict | None = None, site_veto_for: dict | None = None,
+                verbose: bool = False):
     """Choose a route for every connection at once, over the whole stack.
 
     ``requests`` are ``(key, net, start, goal, preferred_layer?)``; ``terminals(point)``
@@ -472,7 +475,9 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                             reach(route.start), reach(route.goal), route.net,
                             price, via_cost, wanted.get(route.key), bias, bans,
                             tuple((avoid_for or {}).get(route.key, ())),
-                            veto=frozenset((veto_for or {}).get(route.key, ())))
+                            veto=frozenset((veto_for or {}).get(route.key, ())),
+                            site_veto=frozenset(
+                                (site_veto_for or {}).get(route.key, ())))
             origin, walk = found if found else (None, None)
             _rebuild(route, origin, walk, sites)
             for resource in route.uses():
