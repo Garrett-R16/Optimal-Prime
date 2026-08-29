@@ -1544,6 +1544,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         layer_vetoes: dict[int, set[int]] = {}
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
+        stack_bans: set = set()
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
         # still needs it after an unrelated connection moved its via. Pieces are remade
@@ -1616,23 +1617,36 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 if verbose:
                     print(f"  weave: net {separated.net.name} separated at via "
                           f"site(s) {sorted(blamed)}; banning and re-dealing")
-            elif key not in pocket_gifted:
-                # Pad-to-pad separation: the pad's own pocket has no stock via site, so
-                # conjure tangent ones and let the stack negotiate an escape.
-                pocket_gifted.add(key)
-                gifts = _pocket_sites(board, meshes, usable, polygon, separated,
-                                      len(sites), via_radius + clearance)
-                if gifts:
+            elif separated.route is not None:
+                # Pad-to-pad separation. Two moves, both needed: conjure tangent via
+                # sites in the pads' pockets so an escape *exists* (once per
+                # connection), and ban the exact turns of the leg that failed so the
+                # stack cannot hand back the same corridor -- a via costs six
+                # millimetres and no search pays that to avoid a route it still
+                # believes in.
+                gifted_now = 0
+                if key not in pocket_gifted:
+                    pocket_gifted.add(key)
+                    gifts = _pocket_sites(board, meshes, usable, polygon, separated,
+                                          len(sites), via_radius + clearance)
                     sites.extend(gifts)
-                    if verbose:
-                        print(f"  weave: net {separated.net.name} separated pad to "
-                              f"pad; gifting {len(gifts)} tangent via site(s) and "
-                              f"re-dealing")
+                    gifted_now = len(gifts)
+                leg = separated.route
+                layer_index = usable.index(separated.layer)
+                ports = list(leg.portals)
+                tris = list(leg.triangles)
+                if not ports:
+                    stack_bans.add((separated.net.code, layer_index, -1, frozenset()))
                 else:
-                    if verbose:
-                        print(f"  weave: net {separated.net.name} separated pad to "
-                              f"pad and its pockets fit no via; standing down")
-                    break
+                    stack_bans.add((separated.net.code, layer_index, tris[0],
+                                    frozenset((ports[0],))))
+                    for i in range(1, len(ports)):
+                        stack_bans.add((separated.net.code, layer_index, tris[i],
+                                        frozenset((ports[i - 1], ports[i]))))
+                if verbose:
+                    print(f"  weave: net {separated.net.name} separated pad to pad; "
+                          f"gifting {gifted_now} tangent site(s), banning the failed "
+                          f"leg's {max(1, len(ports))} turn(s), and re-dealing")
             else:
                 layer_index = usable.index(separated.layer)
                 vetoed = layer_vetoes.setdefault(key, set())
@@ -1648,6 +1662,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             redealt, _ = route_stack(
                 [meshes[layer] for layer in usable], sites, requests,
                 terminals=terminals, rounds=4, warm=chosen, only={key},
+                bans=frozenset(stack_bans),
                 veto_for=layer_vetoes, site_veto_for=site_vetoes)
             fresh = next((r for r in redealt if r.key == key), None)
             if fresh is None or not fresh.found:
