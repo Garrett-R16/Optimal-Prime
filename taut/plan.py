@@ -734,7 +734,10 @@ def _settle_budget(pieces: int) -> int:
     return max(4, min(_SETTLE_BUDGET, 1200 // max(pieces, 1)))
 
 #: How many times the weave may promote a blocked wire to the front and start over.
-_WEAVE_RESTARTS = 100
+#: Promotion is monotone -- each restart adds one piece to the front of the queue and
+#: never removes one -- so a round terminates after at most len(pieces) restarts. The cap
+#: only exists to bound a bug, and it must exceed any real board's piece count.
+_WEAVE_RESTARTS = 2000
 #: One veto per feedback round, and each round was measured at ~30 seconds on the
 #: 630-pad board -- the budget is generous because convergence is one separation at a
 #: time, and the alternative to another round is standing down the whole weave.
