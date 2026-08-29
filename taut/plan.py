@@ -1562,12 +1562,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 mark_of[id(piece)] = (piece.parent, ordinal)
                 by_mark[(piece.parent, ordinal)] = piece
             promoted = [by_mark[mark] for mark in promoted_marks if mark in by_mark]
-            separated = None
+            separations: list = []
             for _restart in range(_WEAVE_RESTARTS):
                 weaves = {layer: Weave(meshes[layer]) for layer in usable}
                 rest = sorted((piece for piece in pieces if piece not in promoted),
                               key=lambda item: item.span)
                 failed = None
+                separations = []
                 for piece in promoted + rest:
                     weave = weaves[piece.layer]
                     head = (float(piece.pad_a.x), float(piece.pad_a.y))
@@ -1578,18 +1579,22 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        need=piece.width / 2.0 + piece.clearance
                                        + GUARDBAND_NM)
                     if not got.found:
+                        if piece in promoted:
+                            # Failed with the front of the queue: genuinely separated.
+                            # Keep weaving -- every separation found this pass is a
+                            # re-deal we do not have to discover one round at a time.
+                            separations.append(piece)
+                            continue
                         failed = piece
                         break
                     piece.route = Leg(layer=usable.index(piece.layer), start=head,
                                       goal=tail, triangles=list(got.triangles),
                                       portals=[key for key, _ in got.crossings])
                 if failed is None:
-                    complete = True
-                    if verbose:
-                        print(f"  weave: complete, {len(promoted)} promotion(s)")
-                    break
-                if failed in promoted:
-                    separated = failed
+                    if not separations:
+                        complete = True
+                        if verbose:
+                            print(f"  weave: complete, {len(promoted)} promotion(s)")
                     break
                 if verbose:
                     print(f"  weave: net {failed.net.name} blocked; promoting and "
@@ -1600,75 +1605,86 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 if verbose:
                     print(f"  weave: restarts exhausted after {len(promoted)} "
                           f"promotions; standing down")
-            if complete or separated is None:
+            if complete or not separations:
                 break
 
-            # The piece failed with the whole layer to itself: its ends really are
-            # separated there. If an end is a via, the stack parked that via somewhere
-            # the weave cannot leave with a full lane -- blame the site, ban it for this
-            # connection, and re-deal. Only when the failing leg runs pad to pad is the
-            # layer itself out of corridors, and the veto escalates to the whole layer.
-            key = separated.parent
-            blamed = {end.site for end in (separated.pad_a, separated.pad_b)
-                      if isinstance(end, _ViaPoint) and end.site >= 0}
-            banned_sites = site_vetoes.setdefault(key, set())
-            if blamed - banned_sites:
-                banned_sites |= blamed
-                if verbose:
-                    print(f"  weave: net {separated.net.name} separated at via "
-                          f"site(s) {sorted(blamed)}; banning and re-dealing")
-            elif separated.route is not None:
+            # Every separated piece failed with the whole layer to itself: its ends
+            # really are separated there. If an end is a via, the stack parked that via
+            # somewhere the weave cannot leave with a full lane -- blame the site, ban
+            # it for that connection, and re-deal. Only when the failing leg runs pad
+            # to pad is the layer itself out of corridors, and the veto escalates.
+            hopeless = False
+            keys: set = set()
+            for separated in separations:
+                key = separated.parent
+                keys.add(key)
+                blamed = {end.site for end in (separated.pad_a, separated.pad_b)
+                          if isinstance(end, _ViaPoint) and end.site >= 0}
+                banned_sites = site_vetoes.setdefault(key, set())
+                if blamed - banned_sites:
+                    banned_sites |= blamed
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} separated at via "
+                              f"site(s) {sorted(blamed)}; banning and re-dealing")
+                elif separated.route is not None:
                 # Pad-to-pad separation. Two moves, both needed: conjure tangent via
                 # sites in the pads' pockets so an escape *exists* (once per
                 # connection), and ban the exact turns of the leg that failed so the
                 # stack cannot hand back the same corridor -- a via costs six
                 # millimetres and no search pays that to avoid a route it still
                 # believes in.
-                gifted_now = 0
-                if key not in pocket_gifted:
-                    pocket_gifted.add(key)
-                    gifts = _pocket_sites(board, meshes, usable, polygon, separated,
-                                          len(sites), via_radius + clearance)
-                    sites.extend(gifts)
-                    gifted_now = len(gifts)
-                leg = separated.route
-                layer_index = usable.index(separated.layer)
-                ports = list(leg.portals)
-                tris = list(leg.triangles)
-                if not ports:
-                    stack_bans.add((separated.net.code, layer_index, -1, frozenset()))
-                else:
-                    stack_bans.add((separated.net.code, layer_index, tris[0],
-                                    frozenset((ports[0],))))
-                    for i in range(1, len(ports)):
-                        stack_bans.add((separated.net.code, layer_index, tris[i],
-                                        frozenset((ports[i - 1], ports[i]))))
-                if verbose:
-                    print(f"  weave: net {separated.net.name} separated pad to pad; "
-                          f"gifting {gifted_now} tangent site(s), banning the failed "
-                          f"leg's {max(1, len(ports))} turn(s), and re-dealing")
-            else:
-                layer_index = usable.index(separated.layer)
-                vetoed = layer_vetoes.setdefault(key, set())
-                if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+                    gifted_now = 0
+                    if key not in pocket_gifted:
+                        pocket_gifted.add(key)
+                        gifts = _pocket_sites(board, meshes, usable, polygon,
+                                              separated, len(sites),
+                                              via_radius + clearance)
+                        sites.extend(gifts)
+                        gifted_now = len(gifts)
+                    leg = separated.route
+                    layer_index = usable.index(separated.layer)
+                    ports = list(leg.portals)
+                    tris = list(leg.triangles)
+                    if not ports:
+                        stack_bans.add((separated.net.code, layer_index, -1,
+                                        frozenset()))
+                    else:
+                        stack_bans.add((separated.net.code, layer_index, tris[0],
+                                        frozenset((ports[0],))))
+                        for i in range(1, len(ports)):
+                            stack_bans.add((separated.net.code, layer_index, tris[i],
+                                            frozenset((ports[i - 1], ports[i]))))
                     if verbose:
-                        print(f"  weave: net {separated.net.name} has no planar "
-                              f"corridor on any layer left to it; standing down")
-                    break
-                vetoed.add(layer_index)
-                if verbose:
-                    print(f"  weave: net {separated.net.name} separated on "
-                          f"{separated.layer}; vetoing that layer and re-dealing")
+                        print(f"  weave: net {separated.net.name} separated pad to "
+                              f"pad; gifting {gifted_now} tangent site(s), banning "
+                              f"the failed leg's {max(1, len(ports))} turn(s), and "
+                              f"re-dealing")
+                else:
+                    layer_index = usable.index(separated.layer)
+                    vetoed = layer_vetoes.setdefault(key, set())
+                    if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+                        if verbose:
+                            print(f"  weave: net {separated.net.name} has no planar "
+                                  f"corridor on any layer left to it; standing down")
+                        hopeless = True
+                        break
+                    vetoed.add(layer_index)
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} separated on "
+                              f"{separated.layer}; vetoing that layer and re-dealing")
+            if hopeless:
+                break
             redealt, _ = route_stack(
                 [meshes[layer] for layer in usable], sites, requests,
-                terminals=terminals, rounds=4, warm=chosen, only={key},
+                terminals=terminals, rounds=4, warm=chosen, only=keys,
                 bans=frozenset(stack_bans),
                 veto_for=layer_vetoes, site_veto_for=site_vetoes)
-            fresh = next((r for r in redealt if r.key == key), None)
-            if fresh is None or not fresh.found:
+            lost = [r for r in redealt if r.key in keys and not r.found]
+            if lost:
                 if verbose:
-                    print(f"  weave: net {separated.net.name} unroutable off "
-                          f"{separated.layer}; standing down")
+                    names = sorted({by_route[r.key].net.name for r in lost})
+                    print(f"  weave: {', '.join(names)} unroutable under the "
+                          f"accumulated bans; standing down")
                 break
             chosen = redealt
         else:
