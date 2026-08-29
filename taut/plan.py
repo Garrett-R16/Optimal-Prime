@@ -1109,9 +1109,154 @@ def _portal_key(key) -> tuple[int, int]:
     return int(key[0]), int(key[1])
 
 
+def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
+                      usable, polygon, pour_layers: dict) -> tuple[int, int]:
+    """A via beside every poured-net pad that cannot touch the pour layer.
+
+    The pour serves its net on one copper layer; an SMD pad on the other side reaches it
+    the way a hand router does -- a via dropped as close to the pad as clearance allows,
+    tied on with a stub. Every check here is a circle or a capsule around something real,
+    conservative by construction: closeness is worth less than certainty.
+    """
+
+    # Standing copper, circumscribed. Pads become discs, tracks capsules, vias discs on
+    # every layer; arcs are covered by the capsules of their two chords.
+    pad_discs: list[tuple[str | None, int, float, float, float]] = []
+    for net in board.nets.values():
+        for pad in net.pads:
+            r = math.hypot(pad.size_x, pad.size_y) / 2.0
+            layer = None if pad.drill_nm else (pad.layers[0] if pad.layers else None)
+            pad_discs.append((layer, pad.net, float(pad.x), float(pad.y), r))
+    segments: dict[str, list[tuple[int, float, float, float, float, float]]] = {}
+    for track in result.tracks:
+        rows = segments.setdefault(track.layer, [])
+        half = track.width_nm / 2.0
+        if isinstance(track, ArcTrack):
+            rows.append((track.net, track.x1, track.y1, track.xm, track.ym, half))
+            rows.append((track.net, track.xm, track.ym, track.x2, track.y2, half))
+        else:
+            rows.append((track.net, track.x1, track.y1, track.x2, track.y2, half))
+    via_discs = [(via.net, float(via.x), float(via.y), via.diameter_nm / 2.0)
+                 for via in result.vias]
+
+    def seg_gap(px, py, x1, y1, x2, y2) -> float:
+        dx, dy = x2 - x1, y2 - y1
+        span = dx * dx + dy * dy
+        if span <= 0.0:
+            return math.hypot(px - x1, py - y1)
+        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / span))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    stitched = missed = 0
+    for net in poured:
+        pour_layer = pour_layers[net.name] or usable[-1]
+        cls = board.netclass_for(net.name)
+        via_r = cls.via_diameter_nm / 2.0
+        stub_half = cls.track_width_nm / 2.0
+        clr = cls.clearance_nm + 20_000.0
+        edge_keep = via_r + board.edge_clearance_nm + 20_000.0
+
+        def clear_at(x: float, y: float, pad_layer: str) -> bool:
+            if not _inside(polygon, x, y):
+                return False
+            count = len(polygon)
+            for i in range(count):
+                ax, ay = polygon[i]
+                bx, by = polygon[(i + 1) % count]
+                if seg_gap(x, y, ax, ay, bx, by) < edge_keep:
+                    return False
+            for layer, code, px, py, r in pad_discs:
+                if code == net.code:
+                    continue
+                if layer is not None and layer not in (pad_layer, pour_layer):
+                    continue
+                if math.hypot(px - x, py - y) < r + via_r + clr:
+                    return False
+            for layer in (pad_layer, pour_layer):
+                for code, x1, y1, x2, y2, half in segments.get(layer, ()):
+                    if code == net.code:
+                        continue
+                    if seg_gap(x, y, x1, y1, x2, y2) < half + via_r + clr:
+                        return False
+            for code, vx, vy, r in via_discs:
+                if math.hypot(vx - x, vy - y) < r + via_r + clr:
+                    return False
+            return True
+
+        def stub_clear(pad, x: float, y: float, pad_layer: str) -> bool:
+            for layer, code, px, py, r in pad_discs:
+                if code == net.code:
+                    continue
+                if layer is not None and layer != pad_layer:
+                    continue
+                if seg_gap(px, py, pad.x, pad.y, x, y) < r + stub_half + clr:
+                    return False
+            for code, x1, y1, x2, y2, half in segments.get(pad_layer, ()):
+                if code == net.code:
+                    continue
+                if min(seg_gap(x1, y1, pad.x, pad.y, x, y),
+                       seg_gap(x2, y2, pad.x, pad.y, x, y),
+                       seg_gap(pad.x, pad.y, x1, y1, x2, y2),
+                       seg_gap(x, y, x1, y1, x2, y2)) < half + stub_half + clr:
+                    return False
+            return True
+
+        for pad in net.pads:
+            if pad.on_layer(pour_layer):
+                continue
+            pad_layer = pad.layers[0] if pad.layers else usable[0]
+            if pad_layer not in usable:
+                missed += 1
+                continue
+            # The pad's support distance in each approach direction: a via tangent to the
+            # face it approaches, not to the circle that swallows the corners.
+            hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+            spin = math.radians(pad.angle)
+            cos_s, sin_s = math.cos(spin), math.sin(spin)
+
+            def support(dx: float, dy: float) -> float:
+                if pad.shape == "circle":
+                    return max(hx, hy)
+                along = abs(dx * cos_s + dy * sin_s)
+                across = abs(-dx * sin_s + dy * cos_s)
+                if pad.shape == "oval" and hx != hy:
+                    long_half, short_half = max(hx, hy), min(hx, hy)
+                    axis = along if hx >= hy else across
+                    return (long_half - short_half) * axis + short_half
+                return hx * along + hy * across
+
+            candidates = []
+            for step in range(24):
+                angle = step * math.tau / 24.0
+                dx, dy = math.cos(angle), math.sin(angle)
+                base = support(dx, dy) + via_r + 50_000.0
+                for k in range(17):
+                    dist = base + k * 150_000.0
+                    candidates.append((dist, pad.x + dist * dx, pad.y + dist * dy))
+            candidates.sort()
+            for dist, x, y in candidates:
+                if clear_at(x, y, pad_layer) and stub_clear(pad, x, y, pad_layer):
+                    result.vias.append(Via(net=net.code, x=int(round(x)),
+                                           y=int(round(y)),
+                                           diameter_nm=cls.via_diameter_nm,
+                                           drill_nm=cls.via_drill_nm))
+                    result.tracks.append(Track(net=net.code, layer=pad_layer,
+                                               x1=pad.x, y1=pad.y,
+                                               x2=int(round(x)), y2=int(round(y)),
+                                               width_nm=cls.track_width_nm))
+                    via_discs.append((net.code, x, y, via_r))
+                    segments.setdefault(pad_layer, []).append(
+                        (net.code, pad.x, pad.y, x, y, stub_half))
+                    stitched += 1
+                    break
+            else:
+                missed += 1
+    return stitched, missed
+
+
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
-               pour_nets: tuple = (),
+               pour_nets=(),
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1120,11 +1265,14 @@ def plan_board(board: Board, layers: list[str] | None = None,
     result.stats = {"board": board.name, "layers": list(usable), "router": "topological"}
 
     polygon = board_polygon(board)
+    # pour_nets: names, or {name: layer}; a None/absent layer means the back layer.
+    pour_layers = (dict(pour_nets) if isinstance(pour_nets, dict)
+                   else {name: None for name in pour_nets})
 
     links: list[_Link] = []
     poured = []
     for net in board.routable:
-        if net.name in pour_nets:
+        if net.name in pour_layers:
             # A plane net: real two-layer boards serve it with a copper pour, not with a
             # hundred point-to-point tracks crossing everything. Its pads stay as
             # obstacles; its connectivity comes from the zone written at the end.
@@ -1881,7 +2029,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
 
     for net in poured:
         result.pours.append(Pour(net=net.code, name=net.name,
-                                 layer=usable[-1], polygon=tuple(polygon)))
+                                 layer=pour_layers[net.name] or usable[-1],
+                                 polygon=tuple(polygon)))
+    if poured:
+        stitched, unstitched = _stitch_pour_pads(board, result, poured, usable, polygon,
+                                                 pour_layers)
+        result.stats["stitch_vias"] = stitched
+        result.stats["stitch_missed"] = unstitched
 
     result.stats.update({
         "connections": len(whole),
