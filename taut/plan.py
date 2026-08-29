@@ -734,7 +734,7 @@ def _settle_budget(pieces: int) -> int:
     return max(4, min(_SETTLE_BUDGET, 1200 // max(pieces, 1)))
 
 #: How many times the weave may promote a blocked wire to the front and start over.
-_WEAVE_RESTARTS = 20
+_WEAVE_RESTARTS = 100
 #: One veto per feedback round, and each round was measured at ~30 seconds on the
 #: 630-pad board -- the budget is generous because convergence is one separation at a
 #: time, and the alternative to another round is standing down the whole weave.
@@ -1475,9 +1475,22 @@ def plan_board(board: Board, layers: list[str] | None = None,
         layer_vetoes: dict[int, set[int]] = {}
         site_vetoes: dict[int, set[int]] = {}
         complete = False
+        # Promotions survive re-deals: a net discovered to need the front of the queue
+        # still needs it after an unrelated connection moved its via. Pieces are remade
+        # from scratch each round, so the memory is (connection, leg ordinal), not the
+        # piece object.
+        promoted_marks: list[tuple] = []
         for _feedback in range(1 + _WEAVE_VETOES):
             _rebuild_pieces()
-            promoted = []
+            mark_of = {}
+            counts: dict = {}
+            by_mark = {}
+            for piece in pieces:
+                ordinal = counts.get(piece.parent, 0)
+                counts[piece.parent] = ordinal + 1
+                mark_of[id(piece)] = (piece.parent, ordinal)
+                by_mark[(piece.parent, ordinal)] = piece
+            promoted = [by_mark[mark] for mark in promoted_marks if mark in by_mark]
             separated = None
             for _restart in range(_WEAVE_RESTARTS):
                 weaves = {layer: Weave(meshes[layer]) for layer in usable}
@@ -1511,6 +1524,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     print(f"  weave: net {failed.net.name} blocked; promoting and "
                           f"restarting")
                 promoted.insert(0, failed)
+                promoted_marks.insert(0, mark_of[id(failed)])
             else:
                 if verbose:
                     print(f"  weave: restarts exhausted after {len(promoted)} "
