@@ -741,7 +741,7 @@ _WEAVE_RESTARTS = 2000
 #: One veto per feedback round, and each round was measured at ~30 seconds on the
 #: 630-pad board -- the budget is generous because convergence is one separation at a
 #: time, and the alternative to another round is standing down the whole weave.
-_WEAVE_VETOES = 48
+_WEAVE_VETOES = 100
 
 #: Rounds of take-out-and-reinsert refinement over the finished weave.
 _WEAVE_DESCENT = 4
@@ -1653,14 +1653,21 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     # edge's failures starved its siblings until the whole net
                     # was unroutable.
                     veto_rows = turn_bans.setdefault(key, set())
-                    if not ports:
-                        veto_rows.add((layer_index, -1, frozenset()))
-                    else:
+                    veto_rows.add((layer_index, -1, frozenset()))
+                    # A woven-first failure means the weave searched the whole layer:
+                    # the stack's particular corridor is not the fact, the endpoints'
+                    # separation is. Ban only the pad exits the failed leg used --
+                    # banning a 312-turn wander wholesale was measured to box the
+                    # connection out of the board entirely.
+                    if ports:
                         veto_rows.add((layer_index, tris[0],
                                        frozenset((ports[0],))))
-                        for i in range(1, len(ports)):
-                            veto_rows.add((layer_index, tris[i],
-                                           frozenset((ports[i - 1], ports[i]))))
+                        veto_rows.add((layer_index, tris[-1],
+                                       frozenset((ports[-1],))))
+                        for i in (1, len(ports) - 1):
+                            if 0 < i < len(ports):
+                                veto_rows.add((layer_index, tris[i],
+                                               frozenset((ports[i - 1], ports[i]))))
                     if verbose:
                         print(f"  weave: net {separated.net.name} separated pad to "
                               f"pad; gifting {gifted_now} tangent site(s), banning "
@@ -1681,9 +1688,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
                               f"{separated.layer}; vetoing that layer and re-dealing")
             if hopeless:
                 break
+            # Separated connections get their vias subsidised: the standard price
+            # made a 312-turn detour cheaper than one barrel, and these are exactly
+            # the wires for which the detour has been proven impassable.
             redealt, _ = route_stack(
                 [meshes[layer] for layer in usable], sites, requests,
                 terminals=terminals, rounds=4, warm=chosen, only=keys,
+                via_cost=1_000_000.0,
                 veto_for=layer_vetoes, site_veto_for=site_vetoes,
                 turn_veto_for=turn_bans)
             lost = [r for r in redealt if r.key in keys and not r.found]
