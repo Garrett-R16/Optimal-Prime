@@ -1548,6 +1548,10 @@ def plan_board(board: Board, layers: list[str] | None = None,
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
         turn_bans: dict[int, set] = {}
+        #: connections proven unweavable after every rung of the ladder -- they keep
+        #: their stack routes and take their chances with the tiers below, so one
+        #: impossible wire no longer costs the other five hundred their weave.
+        outlaws: set[int] = set()
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
         # still needs it after an unrelated connection moved its via. Pieces are remade
@@ -1564,11 +1568,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 counts[piece.parent] = ordinal + 1
                 mark_of[id(piece)] = (piece.parent, ordinal)
                 by_mark[(piece.parent, ordinal)] = piece
-            promoted = [by_mark[mark] for mark in promoted_marks if mark in by_mark]
+            promoted = [by_mark[mark] for mark in promoted_marks
+                        if mark in by_mark and by_mark[mark].parent not in outlaws]
             separations: list = []
             for _restart in range(_WEAVE_RESTARTS):
                 weaves = {layer: Weave(meshes[layer]) for layer in usable}
-                rest = sorted((piece for piece in pieces if piece not in promoted),
+                rest = sorted((piece for piece in pieces if piece not in promoted
+                               and piece.parent not in outlaws),
                               key=lambda item: item.span)
                 failed = None
                 separations = []
@@ -1616,7 +1622,6 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # somewhere the weave cannot leave with a full lane -- blame the site, ban
             # it for that connection, and re-deal. Only when the failing leg runs pad
             # to pad is the layer itself out of corridors, and the veto escalates.
-            hopeless = False
             keys: set = set()
             for separated in separations:
                 key = separated.parent
@@ -1677,11 +1682,12 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     layer_index = usable.index(separated.layer)
                     vetoed = layer_vetoes.setdefault(key, set())
                     if layer_index in vetoed or len(vetoed) + 1 >= len(usable):
+                        outlaws.add(key)
+                        keys.discard(key)
                         if verbose:
-                            print(f"  weave: net {separated.net.name} has no planar "
-                                  f"corridor on any layer left to it; standing down")
-                        hopeless = True
-                        break
+                            print(f"  weave: net {separated.net.name} cannot be "
+                                  f"woven; releasing it to the tiers")
+                        continue
                     vetoed.add(layer_index)
                     if verbose:
                         print(f"  weave: net {separated.net.name} separated on "
@@ -1699,11 +1705,17 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 turn_veto_for=turn_bans)
             lost = [r for r in redealt if r.key in keys and not r.found]
             if lost:
+                # A connection out of options is outlawed, not fatal: restore its
+                # last good route so it still reaches placement, and weave the rest.
+                old_by_key = {r.key: r for r in chosen}
+                lost_keys = {r.key for r in lost}
+                outlaws.update(lost_keys)
+                redealt = [old_by_key.get(r.key, r) if r.key in lost_keys else r
+                           for r in redealt]
                 if verbose:
-                    names = sorted({by_route[r.key].net.name for r in lost})
-                    print(f"  weave: {', '.join(names)} unroutable under the "
-                          f"accumulated bans; standing down")
-                break
+                    names = sorted({by_route[k].net.name for k in lost_keys})
+                    print(f"  weave: {', '.join(names)} out of weavable options; "
+                          f"releasing to the tiers")
             chosen = redealt
         else:
             if verbose:
@@ -1721,6 +1733,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
             for _descent in range(_WEAVE_DESCENT):
                 improved = False
                 for piece in sorted(pieces, key=lambda item: -item.span):
+                    if piece.parent in outlaws:
+                        continue
                     weave = weaves[piece.layer]
                     head = (float(piece.pad_a.x), float(piece.pad_a.y))
                     tail = (float(piece.pad_b.x), float(piece.pad_b.y))
@@ -1750,7 +1764,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # Per layer: portal keys are vertex pairs in each layer's own mesh, and the
             # same pair of numbers names different doorways on different layers.
             woven_order = {layer: weave.order() for layer, weave in weaves.items()}
-            sketch_stats["woven"] = len(pieces)
+            sketch_stats["woven"] = sum(1 for piece in pieces
+                                        if piece.parent not in outlaws)
+            sketch_stats["weave_outlaws"] = len(outlaws)
+            if verbose and outlaws:
+                names = sorted({by_route[k].net.name for k in outlaws})
+                print(f"  weave: complete around {len(outlaws)} outlaw(s): "
+                      f"{', '.join(names)}")
         else:
             _rebuild_pieces()
 
