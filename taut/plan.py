@@ -1692,8 +1692,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     if verbose:
                         print(f"  weave: net {separated.net.name} separated on "
                               f"{separated.layer}; vetoing that layer and re-dealing")
-            if hopeless:
-                break
+            if not keys:
+                continue
             # Separated connections get their vias subsidised: the standard price
             # made a 312-turn detour cheaper than one barrel, and these are exactly
             # the wires for which the detour has been proven impassable.
