@@ -1799,16 +1799,30 @@ def plan_board(board: Board, layers: list[str] | None = None,
         if not pieces:
             _rebuild_pieces()
 
-        by_layer = {layer: [link for link in pieces if link.layer == layer]
+        # The woven wires close among themselves: their sketch has zero crossings by
+        # construction, and letting the outlaws into the same rank stacks was measured
+        # to wrap the referee 4,180 times and push woven wires off their guaranteed
+        # corridors before placement ever saw them. Outlaws embed apart -- their
+        # geometry is only a candidate, and the judge that matters for them is
+        # placement itself, against copper that is actually down.
+        sketch_pieces = ([p for p in pieces if p.parent not in outlaws]
+                         if woven_order is not None else pieces)
+        by_layer = {layer: [link for link in sketch_pieces if link.layer == layer]
                     for layer in usable}
         extras: dict[int, list[tuple[float, float, float]]] = {}
+        if woven_order is not None and outlaws:
+            for layer in usable:
+                apart = [p for p in pieces
+                         if p.parent in outlaws and p.layer == layer]
+                _embed_group(meshes[layer], apart, {}, None, None)
 
         crossings = []
         for _clip_round in range(_CLIP_ROUNDS):
             for layer, group in by_layer.items():
                 _embed_group(meshes[layer], group, extras, resolved,
                              woven_order.get(layer) if woven_order else None)
-            crossings, clips = _check_pieces(board, meshes, usable, pieces, placed_vias)
+            crossings, clips = _check_pieces(board, meshes, usable, sketch_pieces,
+                                             placed_vias)
 
             # An even number of crossings between a pair is a *lens*: the classes are
             # compatible -- a non-crossing embedding exists -- but each wire was pulled
@@ -2150,7 +2164,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # early outlaw was measured to cascade into 197 dropped wires. The woven place
     # first and keep their guarantee; the outlaws bear the cost of their own hardness.
     ordered = sorted((link for link in links if link.layer is not None),
-                     key=lambda l: (l.key in outlaws, l.span))
+                     key=lambda l: (l.parent in outlaws, l.span))
     stranded, rescued_links = run_placement(ordered, rescue=False)
     if stranded:
         stranded, rescued_links = run_placement(list(reversed(ordered)))
