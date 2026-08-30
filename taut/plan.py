@@ -1547,7 +1547,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         layer_vetoes: dict[int, set[int]] = {}
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
-        stack_bans: set = set()
+        turn_bans: dict[int, set] = {}
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
         # still needs it after an unrelated connection moved its via. Pieces are remade
@@ -1648,15 +1648,19 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     layer_index = usable.index(separated.layer)
                     ports = list(leg.portals)
                     tris = list(leg.triangles)
+                    # Bans are per CONNECTION, not per net: +5V has forty-five
+                    # edges sharing one net code, and net-wide bans from one
+                    # edge's failures starved its siblings until the whole net
+                    # was unroutable.
+                    veto_rows = turn_bans.setdefault(key, set())
                     if not ports:
-                        stack_bans.add((separated.net.code, layer_index, -1,
-                                        frozenset()))
+                        veto_rows.add((layer_index, -1, frozenset()))
                     else:
-                        stack_bans.add((separated.net.code, layer_index, tris[0],
-                                        frozenset((ports[0],))))
+                        veto_rows.add((layer_index, tris[0],
+                                       frozenset((ports[0],))))
                         for i in range(1, len(ports)):
-                            stack_bans.add((separated.net.code, layer_index, tris[i],
-                                            frozenset((ports[i - 1], ports[i]))))
+                            veto_rows.add((layer_index, tris[i],
+                                           frozenset((ports[i - 1], ports[i]))))
                     if verbose:
                         print(f"  weave: net {separated.net.name} separated pad to "
                               f"pad; gifting {gifted_now} tangent site(s), banning "
@@ -1680,8 +1684,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
             redealt, _ = route_stack(
                 [meshes[layer] for layer in usable], sites, requests,
                 terminals=terminals, rounds=4, warm=chosen, only=keys,
-                bans=frozenset(stack_bans),
-                veto_for=layer_vetoes, site_veto_for=site_vetoes)
+                veto_for=layer_vetoes, site_veto_for=site_vetoes,
+                turn_veto_for=turn_bans)
             lost = [r for r in redealt if r.key in keys and not r.found]
             if lost:
                 if verbose:

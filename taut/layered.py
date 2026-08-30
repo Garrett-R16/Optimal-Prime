@@ -169,7 +169,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
             price, via_cost: float, prefer: int | None = None,
             bias: float = 1.0, bans: frozenset = frozenset(),
             avoid: tuple = (), node_limit: int = 600_000,
-            veto: frozenset = frozenset(), site_veto: frozenset = frozenset()):
+            veto: frozenset = frozenset(), site_veto: frozenset = frozenset(),
+            turn_veto: frozenset = frozenset()):
     """A* over (layer, triangle), stepping doorway to doorway and layer to layer.
 
     ``veto`` lists layers this connection may not touch at all -- the weave's feedback
@@ -187,6 +188,8 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
         index for index in range(len(meshes)) if index != prefer]
     for layer in order:
         if layer in veto:
+            continue
+        if (layer, -1, frozenset()) in turn_veto:
             continue
         if (net, layer, -1, frozenset()) in bans:
             # The straight line is clear of copper but crosses another wire; this net has
@@ -248,6 +251,7 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
                     extra)
                 if not (state[2][0] == "p"
                         and ((net, _l, _t, frozenset((state[2][1],))) in bans
+                             or (_l, _t, frozenset((state[2][1],))) in turn_veto
                              or (avoid and _crosses_avoid(
                                  avoid, state[0], start[0], start[1],
                                  *where(state[0], state[2])))))
@@ -276,9 +280,13 @@ def _search(meshes: list[Mesh], sites: list[Site], by_triangle, start, goal,
                 if nxt[2] != marker and not (
                     nxt[2][0] == "p"
                     and ((net, layer, tri, frozenset((nxt[2][1],))) in bans
+                         or (layer, tri, frozenset((nxt[2][1],))) in turn_veto
                          or (entered is not None
-                             and (net, layer, tri,
-                                  frozenset((entered, nxt[2][1]))) in bans)
+                             and ((net, layer, tri,
+                                   frozenset((entered, nxt[2][1]))) in bans
+                                  or (layer, tri,
+                                      frozenset((entered, nxt[2][1])))
+                                  in turn_veto))
                          or (avoid and _crosses_avoid(
                              avoid, nxt[0], px, py, *where(nxt[0], nxt[2])))))
                 else None)
@@ -402,7 +410,7 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 bans: frozenset = frozenset(), warm: list | None = None,
                 only: set | None = None, avoid_for: dict | None = None,
                 veto_for: dict | None = None, site_veto_for: dict | None = None,
-                verbose: bool = False):
+                turn_veto_for: dict | None = None, verbose: bool = False):
     """Choose a route for every connection at once, over the whole stack.
 
     ``requests`` are ``(key, net, start, goal, preferred_layer?)``; ``terminals(point)``
@@ -477,7 +485,9 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                             tuple((avoid_for or {}).get(route.key, ())),
                             veto=frozenset((veto_for or {}).get(route.key, ())),
                             site_veto=frozenset(
-                                (site_veto_for or {}).get(route.key, ())))
+                                (site_veto_for or {}).get(route.key, ())),
+                            turn_veto=frozenset(
+                                (turn_veto_for or {}).get(route.key, ())))
             origin, walk = found if found else (None, None)
             _rebuild(route, origin, walk, sites)
             for resource in route.uses():
