@@ -158,7 +158,8 @@ class Weave:
 
     def insert(self, key: int, start: tuple[float, float], goal: tuple[float, float],
                start_tris: list[int], goal_tris: list[int], need: float = 0.0,
-               node_limit: int = 200_000) -> WeaveResult:
+               node_limit: int = 200_000,
+               admit: float = 2.0) -> WeaveResult:
         """Route one wire through the committed board and commit it.
 
         Dijkstra over *(triangle, cell)*; a transition exists only where an uncrossed lane
@@ -219,7 +220,8 @@ class Weave:
                         width -= float(self.mesh.radius[pkey[0]])
                     if lane_to > 1.0 - _EPS * 8:
                         width -= float(self.mesh.radius[pkey[1]])
-                    if need > 0.0 and width < 2.0 * need:
+                    if need > 0.0 and width < admit * need:
+
                         continue
                     # Sit where the wire actually wants to pass: the straight line's own
                     # crossing of this doorway, clamped into the lane. Committing at lane

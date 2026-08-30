@@ -1536,6 +1536,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # genuinely separates its ends on its assigned layer -- the weave stands down and the
     # tiers below carry the board exactly as before.
     woven_order: dict | None = None
+    outlaws: set[int] = set()
     if not ban_mode:
         # A wire that cannot be woven late may weave fine early -- its blockers then thread
         # around *it*. Promotion restarts are the sequential router's oldest trick, and here
@@ -1548,10 +1549,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
         turn_bans: dict[int, set] = {}
-        #: connections proven unweavable after every rung of the ladder -- they keep
-        #: their stack routes and take their chances with the tiers below, so one
-        #: impossible wire no longer costs the other five hundred their weave.
-        outlaws: set[int] = set()
+        #: outlaws: connections proven unweavable after every rung of the ladder --
+        #: they keep their stack routes and take their chances with the tiers below.
         separation_strikes: dict[int, int] = {}
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
@@ -1587,7 +1586,9 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        weave.mesh.terminals(*head),
                                        weave.mesh.terminals(*tail),
                                        need=piece.width / 2.0 + piece.clearance
-                                       + GUARDBAND_NM)
+                                       + GUARDBAND_NM,
+                                       admit=1.85 if separation_strikes.get(
+                                           piece.parent) else 2.0)
                     if not got.found:
                         if piece in promoted:
                             # Failed with the front of the queue: genuinely separated.
@@ -2144,8 +2145,12 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # it -- so the second try seats exactly them first, longest leading, and everyone else
     # still shortest-first. Only if that also strands someone does the placement fall back
     # to longest-first throughout, which completes.
+    # The woven wires are jointly legal BY CONSTRUCTION -- but only against each
+    # other. An outlaw placed early sits down on geometry the weave guaranteed, and one
+    # early outlaw was measured to cascade into 197 dropped wires. The woven place
+    # first and keep their guarantee; the outlaws bear the cost of their own hardness.
     ordered = sorted((link for link in links if link.layer is not None),
-                     key=lambda l: l.span)
+                     key=lambda l: (l.key in outlaws, l.span))
     stranded, rescued_links = run_placement(ordered, rescue=False)
     if stranded:
         stranded, rescued_links = run_placement(list(reversed(ordered)))
