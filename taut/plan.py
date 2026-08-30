@@ -1552,6 +1552,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         #: their stack routes and take their chances with the tiers below, so one
         #: impossible wire no longer costs the other five hundred their weave.
         outlaws: set[int] = set()
+        separation_strikes: dict[int, int] = {}
         complete = False
         # Promotions survive re-deals: a net discovered to need the front of the queue
         # still needs it after an unrelated connection moved its via. Pieces are remade
@@ -1623,8 +1624,22 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # it for that connection, and re-deal. Only when the failing leg runs pad
             # to pad is the layer itself out of corridors, and the veto escalates.
             keys: set = set()
+            # Endgame discipline: a connection on its third separation has had a site
+            # ban, a gift, and a subsidised re-deal -- more rounds were measured to be
+            # whack-a-mole (1,216 separations and climbing on the 630-pad board). It
+            # is outlawed, and the last feedback rounds outlaw every straggler so the
+            # weave completes around them rather than standing the whole board down.
+            closing = _feedback >= _WEAVE_VETOES - 2
             for separated in separations:
                 key = separated.parent
+                separation_strikes[key] = separation_strikes.get(key, 0) + 1
+                if closing or separation_strikes[key] >= 3:
+                    outlaws.add(key)
+                    keys.discard(key)
+                    if verbose:
+                        print(f"  weave: net {separated.net.name} out of strikes; "
+                              f"releasing it to the tiers")
+                    continue
                 keys.add(key)
                 blamed = {end.site for end in (separated.pad_a, separated.pad_b)
                           if isinstance(end, _ViaPoint) and end.site >= 0}
