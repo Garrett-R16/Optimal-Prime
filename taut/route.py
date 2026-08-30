@@ -228,13 +228,13 @@ def _solve_lazily(start, goal, obstacles: list[Obstacle], boundary=None,
             return path
         active.extend(fresh)
         active_ids.update(id(o) for o in fresh)
-        if len(active) > 120:
+        if len(active) > 250:
             # The tangent graph is quadratic in the wrap-circle count; past this density a
             # single call was measured in the tens of minutes. Declaring no-path is honest
             # here: the caller treats it as this layer having no room and falls back.
             raise NoPathFound("taut context too dense to price exactly")
 
-    if len(obstacles) > 120:
+    if len(obstacles) > 250:
         raise NoPathFound("taut context too dense to price exactly")
     return solve(start, goal, obstacles, boundary=boundary, boundary_gap=boundary_gap)
 

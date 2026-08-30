@@ -1893,7 +1893,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         settled_this_round = 0
         for first, second, points in sorted(
                 crossings, key=lambda entry: -len(entry[2])):
-            if settled_this_round >= _settle_budget(len(pieces)):
+            if settled_this_round >= _settle_budget(len(crossings)):
                 # The arbiter prices with the exact solver, and on a saturated board an
                 # unbounded pricing pass was profiled at hours. The budget caps pricing
                 # ATTEMPTS -- a failed settle costs the same solver time as a success --
@@ -1936,12 +1936,19 @@ def plan_board(board: Board, layers: list[str] | None = None,
 
     static_cache: dict[tuple[str, int, int], list[Obstacle]] = {}
 
+    # KiCad prices a gap at the LARGER of the two netclasses' clearances; charging a
+    # pad only the routing wire's own class let default-class wires sit 0.1 mm inside a
+    # Potencia pad's rule, and DRC said so 30 times.
+    class_clr = {code: board.netclass_for(net.name).clearance_nm
+                 * (1.0 + CLEARANCE_MARGIN)
+                 for code, net in board.nets.items()}
+
     def statics(layer: str, clr: float, half: float) -> list[Obstacle]:
         key = (layer, int(clr), int(half))
         cached = static_cache.get(key)
         if cached is None:
-            cached = [pad_obstacle(pad, clr, half) for pad in board.pads
-                      if pad.on_layer(layer)]
+            cached = [pad_obstacle(pad, max(clr, class_clr.get(pad.net, 0.0)), half)
+                      for pad in board.pads if pad.on_layer(layer)]
             cached.extend(_copper_shape_obstacles(board, layer, clr + half))
             # A via is on every layer, so it is in everyone's way on every layer -- including
             # the layer whose leg does not touch it.
