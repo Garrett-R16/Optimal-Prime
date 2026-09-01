@@ -2183,6 +2183,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # vias subsidised, re-embed their pieces apart, and place the board once more.
     # Each round strictly shrinks the sites the stack may try, so this terminates.
     placement_gifted: set[int] = set()
+    poison_strikes: dict[int, int] = {}
     for _redeal in range(4):
         if not stranded:
             break
@@ -2195,6 +2196,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
             if bad - site_vetoes.get(link.parent, set()):
                 site_vetoes.setdefault(link.parent, set()).update(bad)
                 poisoned.setdefault(link.parent, set()).update(bad)
+                poison_strikes[link.parent] = poison_strikes.get(link.parent, 0) + 1
+                if poison_strikes[link.parent] >= 2:
+                    # Measured directly: every one of these connections routes pad to
+                    # pad on an empty board -- the via the stack keeps dealing is the
+                    # only thing that cannot be reached. Ban every site for this
+                    # connection and force the direct deal the geometry wants.
+                    site_vetoes[link.parent] = set(range(len(sites) + 4096))
         if not poisoned:
             break
         # The stock pool near these pads is exhausted -- run 33 re-dealt them onto
