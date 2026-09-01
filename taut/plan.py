@@ -2182,7 +2182,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # via, but the stack can: ban the poisoned sites, re-deal those connections with
     # vias subsidised, re-embed their pieces apart, and place the board once more.
     # Each round strictly shrinks the sites the stack may try, so this terminates.
-    for _redeal in range(3):
+    placement_gifted: set[int] = set()
+    for _redeal in range(4):
         if not stranded:
             break
         poisoned: dict[int, set[int]] = {}
@@ -2196,6 +2197,22 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 poisoned.setdefault(link.parent, set()).update(bad)
         if not poisoned:
             break
+        # The stock pool near these pads is exhausted -- run 33 re-dealt them onto
+        # sites just as poisoned as the last. Conjure tangent sites at their own pads
+        # (placement's version of the weave's pocket gift) so the re-deal has
+        # somewhere genuinely new to go.
+        gifted = 0
+        for link in stranded:
+            if link.parent not in poisoned or link.parent in placement_gifted:
+                continue
+            placement_gifted.add(link.parent)
+            gifts = _pocket_sites(board, meshes, usable, polygon, link,
+                                  len(sites), via_radius + clearance)
+            sites.extend(gifts)
+            gifted += len(gifts)
+        if verbose and gifted:
+            print(f"  placement: gifted {gifted} tangent via site(s) at stranded "
+                  f"pads")
         redealt, _ = route_stack(
             [meshes[layer] for layer in usable], sites, requests,
             terminals=terminals, rounds=4, warm=chosen, only=set(poisoned),
