@@ -2176,6 +2176,91 @@ def plan_board(board: Board, layers: list[str] | None = None,
     if stranded:
         stranded, rescued_links = run_placement(list(reversed(ordered)))
 
+    # Fifty-eight of eighty placement failures said "no geometry between these pads
+    # even on an empty board": an outlaw leg's via endpoint is itself unreachable --
+    # the same poison that made the connection an outlaw. Placement cannot move a
+    # via, but the stack can: ban the poisoned sites, re-deal those connections with
+    # vias subsidised, re-embed their pieces apart, and place the board once more.
+    # Each round strictly shrinks the sites the stack may try, so this terminates.
+    for _redeal in range(3):
+        if not stranded:
+            break
+        poisoned: dict[int, set[int]] = {}
+        for link in stranded:
+            if link.parent not in outlaws:
+                continue
+            bad = {end.site for end in (link.pad_a, link.pad_b)
+                   if isinstance(end, _ViaPoint) and end.site >= 0}
+            if bad - site_vetoes.get(link.parent, set()):
+                site_vetoes.setdefault(link.parent, set()).update(bad)
+                poisoned.setdefault(link.parent, set()).update(bad)
+        if not poisoned:
+            break
+        redealt, _ = route_stack(
+            [meshes[layer] for layer in usable], sites, requests,
+            terminals=terminals, rounds=4, warm=chosen, only=set(poisoned),
+            via_cost=1_000_000.0, veto_for=layer_vetoes,
+            site_veto_for=site_vetoes, turn_veto_for=turn_bans)
+        old_by = {r.key: r for r in chosen}
+        moved = set()
+        merged = []
+        for r in redealt:
+            if r.key in poisoned and not r.found:
+                merged.append(old_by[r.key])
+            else:
+                if r.key in poisoned:
+                    moved.add(r.key)
+                merged.append(r)
+        chosen = merged
+        if not moved:
+            break
+        if verbose:
+            print(f"  placement: re-dealt {len(moved)} outlaw connection(s) off "
+                  f"poisoned via sites")
+        placed_vias[:] = [v for v in placed_vias if v.owner not in moved]
+        links[:] = [p for p in links if p.parent not in moved]
+        fresh_pieces = []
+        next_key = max((p.key for p in links), default=-1) + 1
+        for route in chosen:
+            if route.key not in moved:
+                continue
+            parent = by_route[route.key]
+            stops = [_pad_like(parent.pad_a)]
+            for index in route.vias:
+                site = sites[index]
+                point = _ViaPoint(x=site.x, y=site.y, net=parent.net.code,
+                                  owner=parent.key,
+                                  diameter=board.netclass_for(
+                                      parent.net.name).via_diameter_nm,
+                                  drill=board.netclass_for(
+                                      parent.net.name).via_drill_nm,
+                                  site=index)
+                placed_vias.append(point)
+                stops.append(point)
+            stops.append(_pad_like(parent.pad_b))
+            for leg, (here, there) in zip(route.legs, zip(stops, stops[1:])):
+                piece = _Link(key=next_key, net=parent.net, pad_a=here, pad_b=there,
+                              span=math.dist((here.x, here.y), (there.x, there.y)),
+                              width=parent.width, clearance=parent.clearance,
+                              halo=parent.halo)
+                next_key += 1
+                piece.parent = parent.key
+                piece.layer = usable[leg.layer]
+                piece.route = leg
+                links.append(piece)
+                fresh_pieces.append(piece)
+        for layer in usable:
+            group = [p for p in fresh_pieces if p.layer == layer]
+            _embed_group(meshes[layer], group, {}, None, None)
+        for piece in fresh_pieces:
+            taut_of[piece.key] = list(piece.elements)
+            taut_layer[piece.key] = piece.layer
+        by_key.clear()
+        by_key.update({link.key: link for link in links})
+        ordered = sorted((link for link in links if link.layer is not None),
+                         key=lambda l: (l.parent in outlaws, l.span))
+        stranded, rescued_links = run_placement(list(reversed(ordered)))
+
     # (recursion carries the pour set through)
     # The cost arbiter answers to placement. Its settlements are priced pairwise, and a
     # pairwise price is blind to one cost: reshaping the sketch so that a third wire has no
