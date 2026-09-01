@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .board import Board, Net, Pad
+from .board import Board, CopperShape, Net, Pad
 from .funnel import Curve, Gate, Line, funnel, orient, taut_through
 from .rubberband import Arc as RbArc, Crossing, Segment as RbSegment
 from .rubberband import Wire as RbWire, _segments_cross, rubberband, to_geometry
@@ -1384,6 +1384,31 @@ def plan_board(board: Board, layers: list[str] | None = None,
     clearance = max((link.clearance for link in links), default=200_000.0)
     width = max((link.width for link in links), default=250_000.0)
 
+    # Stitch FIRST, against the bare board: by the end of routing the copper crowds
+    # the pads and a quarter of the stitches failed to fit. Placed now they nearly all
+    # fit, and become fixed copper that everything downstream -- meshes, referee,
+    # placement -- routes around, the way a hand router treats the ground vias it
+    # places before anything else. The pour itself still fills last.
+    if poured:
+        stitched, unstitched = _stitch_pour_pads(board, result, poured, usable,
+                                                 polygon, pour_layers)
+        result.stats["stitch_vias"] = stitched
+        result.stats["stitch_missed"] = unstitched
+        keep = tuple(shape for shape in board.copper_shapes
+                     if shape.label != "stitch")
+        fresh = []
+        for via in result.vias:
+            for layer in usable:
+                fresh.append(CopperShape(layer=layer,
+                                         vertices=((via.x, via.y),),
+                                         width_nm=via.diameter_nm, label="stitch"))
+        for track in result.tracks:
+            fresh.append(CopperShape(layer=track.layer,
+                                     vertices=((track.x1, track.y1),
+                                               (track.x2, track.y2)),
+                                     width_nm=track.width_nm, label="stitch"))
+        board.copper_shapes = keep + tuple(fresh)
+
     meshes: dict[str, Mesh] = {}
     for layer in usable:
         cores = _cores(board, layer)
@@ -2419,12 +2444,6 @@ def plan_board(board: Board, layers: list[str] | None = None,
         result.pours.append(Pour(net=net.code, name=net.name,
                                  layer=pour_layers[net.name] or usable[-1],
                                  polygon=tuple(polygon)))
-    if poured:
-        stitched, unstitched = _stitch_pour_pads(board, result, poured, usable, polygon,
-                                                 pour_layers)
-        result.stats["stitch_vias"] = stitched
-        result.stats["stitch_missed"] = unstitched
-
     result.stats.update({
         "connections": len(whole),
         "routed": len(result.routed),
