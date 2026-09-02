@@ -61,10 +61,10 @@ _KEEP_WITHOUT_ASKING = 1.15
 _SEATING_PASSES = 8
 
 #: How many settled tracks rip-up will move to make room for one that has nowhere to go.
-_RIPUP_LIMIT = 4
+_RIPUP_LIMIT = 8
 
 #: How far the displacement may cascade -- a track moved out of the way may move one itself.
-_RIPUP_DEPTH = 3
+_RIPUP_DEPTH = 4
 
 
 # --------------------------------------------------------------------------- outline
@@ -2222,7 +2222,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                 site_vetoes.setdefault(link.parent, set()).update(bad)
                 poisoned.setdefault(link.parent, set()).update(bad)
                 poison_strikes[link.parent] = poison_strikes.get(link.parent, 0) + 1
-                if poison_strikes[link.parent] >= 2:
+                if poison_strikes[link.parent] >= 1:
                     # Measured directly: every one of these connections routes pad to
                     # pad on an empty board -- the via the stack keeps dealing is the
                     # only thing that cannot be reached. Ban every site for this
@@ -2241,8 +2241,31 @@ def plan_board(board: Board, layers: list[str] | None = None,
             placement_gifted.add(link.parent)
             gifts = _pocket_sites(board, meshes, usable, polygon, link,
                                   len(sites), via_radius + clearance)
-            sites.extend(gifts)
-            gifted += len(gifts)
+            # The pocket check knows the bare board; at placement time there is copper
+            # down, and a gifted site on top of a standing track is a short (three of
+            # them, measured). Keep only gifts that clear every placed path on every
+            # layer.
+            clear_gifts = []
+            for gift in gifts:
+                hit = False
+                for layer in usable:
+                    for placed in settled[layer]:
+                        if placed.net == link.net.code:
+                            continue
+                        if any(ob.distance_to_point(gift.x, gift.y) < ob.r
+                               for ob in _path_obstacles(placed.path,
+                                                         via_radius + clearance,
+                                                         placed.net)):
+                            hit = True
+                            break
+                    if hit:
+                        break
+                if not hit:
+                    clear_gifts.append(Site(index=len(sites) + len(clear_gifts),
+                                            x=gift.x, y=gift.y,
+                                            triangles=gift.triangles))
+            sites.extend(clear_gifts)
+            gifted += len(clear_gifts)
         if verbose and gifted:
             print(f"  placement: gifted {gifted} tangent via site(s) at stranded "
                   f"pads")
@@ -2436,9 +2459,19 @@ def plan_board(board: Board, layers: list[str] | None = None,
         result.tracks.extend(_elements_to_tracks(link.elements, link.net.code,
                                                  link.layer, int(link.width)))
 
-    result.vias.extend(Via(net=via.net, x=int(round(via.x)), y=int(round(via.y)),
-                           diameter_nm=int(via.diameter), drill_nm=int(via.drill))
-                       for via in placed_vias if whole.get(via.owner))
+    # Two connections of one net dealt onto the same site are one physical barrel;
+    # emitting both drew 13 co-located holes and a dangling via apiece on the 630-pad
+    # board.
+    seen_vias: set = set()
+    for via in placed_vias:
+        if not whole.get(via.owner):
+            continue
+        spot = (via.net, int(round(via.x)), int(round(via.y)))
+        if spot in seen_vias:
+            continue
+        seen_vias.add(spot)
+        result.vias.append(Via(net=via.net, x=spot[1], y=spot[2],
+                               diameter_nm=int(via.diameter), drill_nm=int(via.drill)))
 
     for net in poured:
         result.pours.append(Pour(net=net.code, name=net.name,
