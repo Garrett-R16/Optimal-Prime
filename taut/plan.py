@@ -2213,6 +2213,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         if not stranded:
             break
         poisoned: dict[int, set[int]] = {}
+        escalated: set[int] = set()
         for link in stranded:
             if link.parent not in outlaws:
                 continue
@@ -2228,6 +2229,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     # only thing that cannot be reached. Ban every site for this
                     # connection and force the direct deal the geometry wants.
                     site_vetoes[link.parent] = set(range(len(sites) + 4096))
+                    escalated.add(link.parent)
         if not poisoned:
             break
         # The stock pool near these pads is exhausted -- run 33 re-dealt them onto
@@ -2288,8 +2290,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
         if not moved:
             break
         if verbose:
+            direct = sum(1 for r in redealt if r.key in escalated and r.found
+                         and not r.vias)
+            lost_direct = sum(1 for r in redealt if r.key in escalated
+                              and not r.found)
             print(f"  placement: re-dealt {len(moved)} outlaw connection(s) off "
-                  f"poisoned via sites")
+                  f"poisoned via sites; {len(escalated)} escalated via-free, "
+                  f"{direct} dealt straight, {lost_direct} found no direct deal")
         placed_vias[:] = [v for v in placed_vias if v.owner not in moved]
         links[:] = [p for p in links if p.parent not in moved]
         fresh_pieces = []
