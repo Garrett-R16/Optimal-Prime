@@ -1651,6 +1651,24 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # it for that connection, and re-deal. Only when the failing leg runs pad
             # to pad is the layer itself out of corridors, and the veto escalates.
             keys: set = set()
+            if verbose and separations:
+                # Why does a piece separate? Probe the same insert with capacity ignored:
+                # found means the count gate cut it (the layer is genuinely full there),
+                # not found means committed chords wall its terminals in.
+                capacity_bound = walled = 0
+                for probe in separations:
+                    weave = weaves[probe.layer]
+                    head = (float(probe.pad_a.x), float(probe.pad_a.y))
+                    tail = (float(probe.pad_b.x), float(probe.pad_b.y))
+                    trial = weave.insert(-1, head, tail, weave.mesh.terminals(*head),
+                                         weave.mesh.terminals(*tail), need=0.0)
+                    if trial.found:
+                        weave.remove(-1)
+                        capacity_bound += 1
+                    else:
+                        walled += 1
+                print(f"  weave: {len(separations)} separation(s): {capacity_bound} "
+                      f"capacity-bound, {walled} walled in by chords")
             # Endgame discipline: a connection on its third separation has had a site
             # ban, a gift, and a subsidised re-deal -- more rounds were measured to be
             # whack-a-mole (1,216 separations and climbing on the 630-pad board). It
