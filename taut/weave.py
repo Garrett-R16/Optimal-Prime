@@ -60,6 +60,17 @@ class Weave:
         self._cells: dict[int, TriangleCells] = {}
         self._corners: dict[int, list[tuple[float, float]]] = {}
         self._edge_of: dict[int, dict[tuple[int, int], tuple[int, bool]]] = {}
+        #: per wire: the half-pitch it needs at a doorway (half width + clearance)
+        self.need_of: dict[int, float] = {}
+        #: per wire: its clearance, so neighbours share one gap instead of paying two
+        self.clr_of: dict[int, float] = {}
+        #: every result ever returned, kept live: re-seating updates their fractions
+        self._results: dict[int, WeaveResult] = {}
+        #: per (triangle, wire): the portals its chord's two ends sit on (None = terminal
+        #: anchor), so the chord can be re-seated whenever a doorway's ranks are
+        self._chord_ends: dict = {}
+        #: per portal key: the free triangles on its two sides
+        self._portal_tris: dict = {}
 
     # ------------------------------------------------------------------ geometry helpers
 
@@ -159,7 +170,7 @@ class Weave:
     def insert(self, key: int, start: tuple[float, float], goal: tuple[float, float],
                start_tris: list[int], goal_tris: list[int], need: float = 0.0,
                node_limit: int = 200_000,
-               admit: float = 2.0) -> WeaveResult:
+               admit: float = 2.0, clearance: float = 0.0) -> WeaveResult:
         """Route one wire through the committed board and commit it.
 
         Dijkstra over *(triangle, cell)*; a transition exists only where an uncrossed lane
@@ -210,19 +221,22 @@ class Weave:
             for other, portal in self.mesh.adjacent(tri):
                 pkey = portal.key()
                 span = portal.length
+                sides = self._portal_tris.setdefault(pkey, set())
+                sides.add(tri)
+                sides.add(other)
+                # Capacity is a COUNT, not a place. A doorway holds a wire if the width
+                # its committed wires have not claimed still holds one more -- whichever
+                # slot it takes. Committing wires where their straight lines crossed was
+                # measured to make a three-wire doorway hold two or three depending on
+                # insertion order: two near the middle left two useless slivers. Only the
+                # order at a doorway is decided here; positions are re-seated by rank
+                # after every commit, so free width is never fragmented.
+                # One spare clearance beyond the exact fit: the embed seats by rank with
+                # its own guard and margin, and a doorway filled to the last micron was
+                # measured to cost sonde 32 mm in wraps downstream.
+                if need > 0.0 and self._room(pkey, span) - clearance < admit * need:
+                    continue
                 for lane_from, lane_to in self.open_lanes(tri, pkey):
-                    # The lane has to physically hold the wire: clearance to the committed
-                    # wire (or copper corner) on each side. A sketch that is planar but
-                    # over-packed just moves the failure from crossing to graze, and the
-                    # last wire in still pays -- capacity belongs in the weave, not after.
-                    width = (lane_to - lane_from) * span
-                    if lane_from < _EPS * 8:
-                        width -= float(self.mesh.radius[pkey[0]])
-                    if lane_to > 1.0 - _EPS * 8:
-                        width -= float(self.mesh.radius[pkey[1]])
-                    if need > 0.0 and width < admit * need:
-
-                        continue
                     # Sit where the wire actually wants to pass: the straight line's own
                     # crossing of this doorway, clamped into the lane. Committing at lane
                     # midpoints made every wire an exaggerated obstacle to the ones after
@@ -260,7 +274,14 @@ class Weave:
         result.found = True
         result.triangles = [cursor[0]] + [tri for tri, _, _ in walk]
         result.crossings = [(pkey, lane_mid) for _, pkey, lane_mid in walk]
+        self.need_of[key] = need
+        self.clr_of[key] = clearance
+        self._results[key] = result
         self._commit(key, start, goal, cursor, final, result)
+        for pkey, _ in result.crossings:
+            self._reseat(pkey)
+        result.crossings = [(pkey, self._fraction_of(pkey, key))
+                            for pkey, _ in result.crossings]
         return result
 
     def _line_fraction(self, key: tuple[int, int], start, goal):
@@ -305,6 +326,9 @@ class Weave:
             stations.append((tri, entry, exit_))
 
         for index, (tri, entry, exit_) in enumerate(stations):
+            pkey_in = result.crossings[index - 1][0] if index > 0 else None
+            pkey_out = (result.crossings[index][0]
+                        if index < len(result.crossings) else None)
             if entry is None:
                 cell = first_state[1] if index == 0 else 0
                 entry = self._anchor_param(tri, start[0], start[1], cell)
@@ -312,6 +336,83 @@ class Weave:
                 cell = final_state[1]
                 exit_ = self._anchor_param(tri, goal[0], goal[1], cell)
             self.chords.setdefault(tri, []).append(Chord(entry, exit_, key))
+            self._chord_ends[(tri, key)] = (pkey_in, pkey_out)
+            self._cells.pop(tri, None)
+
+    # ------------------------------------------------------------------ rank seating
+
+    def _room(self, pkey: tuple[int, int], span: float) -> float:
+        """Width of this doorway not yet claimed by committed wires.
+
+        A wire claims its width plus ONE clearance: neighbours share the gap between
+        them. Charging every wire two clearances made three wires need 2.06 mm of a
+        doorway where 1.63 is the rule.
+        """
+        free = span - float(self.mesh.radius[pkey[0]]) - float(self.mesh.radius[pkey[1]])
+        for _, wire in self.on_portal.get(pkey, ()):
+            free -= 2.0 * self.need_of.get(wire, 0.0) - self.clr_of.get(wire, 0.0)
+        return free
+
+    def _fraction_of(self, pkey: tuple[int, int], key: int) -> float:
+        for fraction, wire in self.on_portal.get(pkey, ()):
+            if wire == key:
+                return fraction
+        raise KeyError((pkey, key))
+
+    def _reseat(self, pkey: tuple[int, int]) -> None:
+        """Seat every wire on a doorway by rank: pitches stacked, slack shared evenly.
+
+        Crossing-freedom is a property of the ORDER of chord endpoints around a
+        triangle's boundary, so an order-preserving re-seating cannot introduce a
+        crossing -- and it leaves the doorway's free width in one piece, which is what
+        makes capacity a count.
+        """
+        records = self.on_portal.get(pkey)
+        if not records:
+            return
+        pa, pb = self.mesh.points[pkey[0]], self.mesh.points[pkey[1]]
+        span = math.hypot(float(pb[0]) - float(pa[0]), float(pb[1]) - float(pa[1]))
+        if span <= 0.0:
+            return
+        ra = float(self.mesh.radius[pkey[0]])
+        rb = float(self.mesh.radius[pkey[1]])
+        clrs = [self.clr_of.get(wire, 0.0) for _, wire in records]
+        widths = [2.0 * (self.need_of.get(wire, 0.0) - clr)
+                  for (_, wire), clr in zip(records, clrs)]
+        free = span - ra - rb
+        used = sum(widths) + sum(clrs) + (clrs[0] if clrs else 0.0)
+        gap = max(free - used, 0.0) / (len(records) + 1)
+        cursor = ra + (clrs[0] if clrs else 0.0) + gap
+        seated = []
+        for (_, wire), width, clr in zip(records, widths, clrs):
+            centre = cursor + width / 2.0
+            seated.append((min(max(centre / span, _EPS * 16), 1.0 - _EPS * 16), wire))
+            cursor += width + clr + gap
+        self.on_portal[pkey] = seated
+        for fraction, wire in seated:
+            live = self._results.get(wire)
+            if live is not None:
+                live.crossings = [(k, fraction if k == pkey else f)
+                                  for k, f in live.crossings]
+        # chords whose ends sit on this doorway move with it, on both sides
+        for tri in self._portal_tris.get(pkey, ()):
+            rows = self.chords.get(tri)
+            if not rows:
+                continue
+            fresh = []
+            for chord in rows:
+                ends = self._chord_ends.get((tri, chord.key))
+                if ends is None:
+                    fresh.append(chord)
+                    continue
+                pkey_in, pkey_out = ends
+                t1, t2 = chord.t1, chord.t2
+                if pkey_in == pkey:
+                    t1 = self.portal_param(tri, pkey, self._fraction_of(pkey, chord.key))
+                if pkey_out == pkey:
+                    t2 = self.portal_param(tri, pkey, self._fraction_of(pkey, chord.key))
+                fresh.append(Chord(t1, t2, chord.key))
+            self.chords[tri] = fresh
             self._cells.pop(tri, None)
 
     # ------------------------------------------------------------------ revision
@@ -322,7 +423,9 @@ class Weave:
                   for chord in chords if chord.key == key]
         records = [(pkey, fraction) for pkey, records in self.on_portal.items()
                    for fraction, wire in records if wire == key]
-        return chords, records
+        ends = [((tri, wire), portals) for (tri, wire), portals in self._chord_ends.items()
+                if wire == key]
+        return chords, records, ends
 
     def remove(self, key: int) -> None:
         """Take one wire out of the board; everyone else's cells reopen behind it."""
@@ -331,20 +434,32 @@ class Weave:
             if len(kept) != len(self.chords[tri]):
                 self.chords[tri] = kept
                 self._cells.pop(tri, None)
+        touched = []
         for pkey in list(self.on_portal):
+            before = len(self.on_portal[pkey])
             self.on_portal[pkey] = [(fraction, wire)
                                     for fraction, wire in self.on_portal[pkey]
                                     if wire != key]
+            if len(self.on_portal[pkey]) != before:
+                touched.append(pkey)
+        for tri in list(self.chords):
+            self._chord_ends.pop((tri, key), None)
+        for pkey in touched:
+            self._reseat(pkey)
 
     def restore(self, key: int, snapshot) -> None:
-        chords, records = snapshot
+        chords, records, ends = snapshot
         for tri, chord in chords:
             self.chords.setdefault(tri, []).append(chord)
             self._cells.pop(tri, None)
+        for (tri, wire), portals in ends:
+            self._chord_ends[(tri, wire)] = portals
         for pkey, fraction in records:
             rows = self.on_portal.setdefault(pkey, [])
             rows.append((fraction, key))
             rows.sort()
+        for pkey, _ in records:
+            self._reseat(pkey)
 
     def chain_length(self, start, goal, crossings) -> float:
         points = [start] + [self._lane_point(pkey, fraction)

@@ -5,12 +5,10 @@ weave commits each wire where its line crosses the doorway; two wires near the m
 leave two slivers that hold nothing, and the third is rejected although the total free
 width holds it. Measured on the 630-pad board this is the mechanism behind 97 of 264
 connections being outlawed. The fix is the rubber-band discipline: only ORDER at a
-doorway, positions seated by rank at embed time.
+doorway, capacity by count, positions re-seated by rank after every commit.
 """
 import math
 from pathlib import Path
-
-import pytest
 
 from scenes import scene, write_scene
 from taut.board import load_board
@@ -57,12 +55,11 @@ def _woven(tmp_path: Path, gap_mm: float, order: tuple[str, ...]) -> int:
         a, b = list(nets[name].pads)
         head, tail = (float(a.x), float(a.y)), (float(b.x), float(b.y))
         got += weave.insert(k, head, tail, mesh.terminals(*head),
-                            mesh.terminals(*tail), need=need).found
+                            mesh.terminals(*tail), need=need,
+                            clearance=clearance).found
     return got
 
 
-@pytest.mark.xfail(reason="doorway capacity is position-dependent (fragmentation); "
-                          "needs the rank-only doorway model", strict=True)
 def test_capacity_does_not_depend_on_insertion_order(tmp_path):
     gap = 2.0  # three wires fit with room to spare
     assert _woven(tmp_path, gap, ("B", "A", "C")) == 3

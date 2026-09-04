@@ -1612,6 +1612,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        weave.mesh.terminals(*tail),
                                        need=piece.width / 2.0 + piece.clearance
                                        + GUARDBAND_NM,
+                                       clearance=piece.clearance,
                                        admit=1.85 if separation_strikes.get(
                                            piece.parent) else 2.0)
                     if not got.found:
@@ -1787,7 +1788,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        weave.mesh.terminals(*head),
                                        weave.mesh.terminals(*tail),
                                        need=piece.width / 2.0 + piece.clearance
-                                       + GUARDBAND_NM)
+                                       + GUARDBAND_NM, clearance=piece.clearance)
                     if (got.found and weave.chain_length(head, tail, got.crossings)
                             < old_len - 10_000.0):
                         piece.route = Leg(layer=usable.index(piece.layer), start=head,

@@ -127,12 +127,11 @@ def test_a_truly_separated_wire_reports_failure():
             ((4 * MM, 36 * MM), (36 * MM, 4 * MM)),
             ((20 * MM, 2 * MM), (20 * MM, 38 * MM))]
     results = []
-    lines = []
     for index, (s, g) in enumerate(jobs, start=1):
-        got = weave.insert(index, s, g, rings(mesh, s), rings(mesh, g))
-        results.append(got)
-        if got.found:
-            lines.append(polyline_of(weave, s, g, got))
+        results.append((s, g, weave.insert(index, s, g, rings(mesh, s), rings(mesh, g))))
+    # Positions at a doorway are provisional until the board is done -- every commit
+    # re-seats its doorways by rank -- so the geometry is read once all wires are in.
+    lines = [polyline_of(weave, s, g, got) for s, g, got in results if got.found]
     # whatever routed, routed planar
     for i in range(len(lines)):
         for j in range(i + 1, len(lines)):
