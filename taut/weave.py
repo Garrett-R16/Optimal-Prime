@@ -231,9 +231,11 @@ class Weave:
                 # insertion order: two near the middle left two useless slivers. Only the
                 # order at a doorway is decided here; positions are re-seated by rank
                 # after every commit, so free width is never fragmented.
-                # One spare clearance beyond the exact fit: the embed seats by rank with
-                # its own guard and margin, and a doorway filled to the last micron was
-                # measured to cost sonde 32 mm in wraps downstream.
+                # One spare clearance beyond the exact fit. Measured on sonde: no reserve
+                # 745 mm, one clearance 713.58 mm, one wire width 811 mm -- length is
+                # not monotonic in the reserve, because the greedy weave's corridor
+                # choices swing with admission. One clearance is the best measured point,
+                # not a derived optimum; the embed seats by rank with its own guard.
                 if need > 0.0 and self._room(pkey, span) - clearance < admit * need:
                     continue
                 for lane_from, lane_to in self.open_lanes(tri, pkey):
