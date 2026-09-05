@@ -1574,6 +1574,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
         turn_bans: dict[int, set] = {}
+        #: connections whose layer preference the weave flipped after a walled separation
+        flipped: dict[int, int] = {}
         #: outlaws: connections proven unweavable after every rung of the ladder --
         #: they keep their stack routes and take their chances with the tiers below.
         separation_strikes: dict[int, int] = {}
@@ -1652,25 +1654,27 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # it for that connection, and re-deal. Only when the failing leg runs pad
             # to pad is the layer itself out of corridors, and the veto escalates.
             keys: set = set()
+            # Why does a piece separate? Probe the same insert with capacity ignored:
+            # found means the count gate cut it (the layer is genuinely full there),
+            # not found means committed chords wall its terminals in -- a planar
+            # conflict on that layer that no order resolves. Measured: 73 of 119.
+            walled_pieces: set = set()
+            capacity_bound = 0
+            for probe in separations:
+                weave = weaves[probe.layer]
+                head = (float(probe.pad_a.x), float(probe.pad_a.y))
+                tail = (float(probe.pad_b.x), float(probe.pad_b.y))
+                trial = weave.insert(-1, head, tail, weave.mesh.terminals(*head),
+                                     weave.mesh.terminals(*tail), need=0.0,
+                                     net=probe.net.code)
+                if trial.found:
+                    weave.remove(-1)
+                    capacity_bound += 1
+                else:
+                    walled_pieces.add(id(probe))
             if verbose and separations:
-                # Why does a piece separate? Probe the same insert with capacity ignored:
-                # found means the count gate cut it (the layer is genuinely full there),
-                # not found means committed chords wall its terminals in.
-                capacity_bound = walled = 0
-                for probe in separations:
-                    weave = weaves[probe.layer]
-                    head = (float(probe.pad_a.x), float(probe.pad_a.y))
-                    tail = (float(probe.pad_b.x), float(probe.pad_b.y))
-                    trial = weave.insert(-1, head, tail, weave.mesh.terminals(*head),
-                                         weave.mesh.terminals(*tail), need=0.0,
-                                         net=probe.net.code)
-                    if trial.found:
-                        weave.remove(-1)
-                        capacity_bound += 1
-                    else:
-                        walled += 1
                 print(f"  weave: {len(separations)} separation(s): {capacity_bound} "
-                      f"capacity-bound, {walled} walled in by chords")
+                      f"capacity-bound, {len(walled_pieces)} walled in by chords")
             # Endgame discipline: a connection on its third separation has had a site
             # ban, a gift, and a subsidised re-deal -- more rounds were measured to be
             # whack-a-mole (1,216 separations and climbing on the 630-pad board). It
@@ -1697,6 +1701,18 @@ def plan_board(board: Board, layers: list[str] | None = None,
                         print(f"  weave: net {separated.net.name} separated at via "
                               f"site(s) {sorted(blamed)}; banning and re-dealing")
                 elif separated.route is not None:
+                    # Topology decided each connection's layer once, from straight-line
+                    # crossings, and never hears which pairs cannot be ordered on it. A
+                    # walled separation is that message: flip the connection's layer
+                    # preference so the re-deal vias out beside the pad instead of
+                    # searching the layer that has no corridor for it.
+                    if (id(separated) in walled_pieces and len(usable) > 1
+                            and key not in flipped):
+                        current = prefer.get(key)
+                        flipped[key] = (1 - current) if current in (0, 1) else 0
+                        if verbose:
+                            print(f"  weave: net {separated.net.name} walled on "
+                                  f"{separated.layer}; flipping its layer preference")
                 # Pad-to-pad separation. Two moves, both needed: conjure tangent via
                 # sites in the pads' pockets so an escape *exists* (once per
                 # connection), and ban the exact turns of the leg that failed so the
@@ -1759,8 +1775,9 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # Separated connections get their vias subsidised: the standard price
             # made a 312-turn detour cheaper than one barrel, and these are exactly
             # the wires for which the detour has been proven impassable.
+            asked = [(k, n, a, b, flipped.get(k, p)) for k, n, a, b, p in requests]
             redealt, _ = route_stack(
-                [meshes[layer] for layer in usable], sites, requests,
+                [meshes[layer] for layer in usable], sites, asked,
                 terminals=terminals, rounds=4, warm=chosen, only=keys,
                 via_cost=1_000_000.0,
                 veto_for=layer_vetoes, site_veto_for=site_vetoes,
