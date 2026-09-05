@@ -56,6 +56,17 @@ class Track:
 
 
 @dataclass(frozen=True, slots=True)
+class Via:
+    """A through via: the same hole on every copper layer, so a net can change sides."""
+
+    net: int
+    x: int
+    y: int
+    diameter_nm: int
+    drill_nm: int
+
+
+@dataclass(frozen=True, slots=True)
 class ArcTrack:
     net: int
     layer: str
@@ -69,16 +80,35 @@ class ArcTrack:
     length_nm: float = 0.0
 
 
+#: What one through via adds to a signal's length: the barrel is the board's thickness of
+#: conductor in series with the tracks. Counted so that "shorter" can never be bought by
+#: quietly moving distance into the third dimension.
+VIA_LENGTH_NM = 1_600_000
+
+
+@dataclass(frozen=True, slots=True)
+class Pour:
+    """A net served by a copper zone instead of tracks: the plane a real board would use."""
+
+    net: int
+    name: str
+    layer: str
+    #: the zone's boundary, usually the board outline
+    polygon: tuple
+
+
 @dataclass
 class RouteResult:
     tracks: list[Track | ArcTrack] = field(default_factory=list)
+    vias: list[Via] = field(default_factory=list)
+    pours: list["Pour"] = field(default_factory=list)
     routed: list[tuple[int, str]] = field(default_factory=list)
     failed: list[tuple[int, str, str]] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
     @property
     def total_length_nm(self) -> float:
-        return sum(t.length_nm for t in self.tracks)
+        return sum(t.length_nm for t in self.tracks) + VIA_LENGTH_NM * len(self.vias)
 
     @property
     def arc_count(self) -> int:
@@ -198,7 +228,14 @@ def _solve_lazily(start, goal, obstacles: list[Obstacle], boundary=None,
             return path
         active.extend(fresh)
         active_ids.update(id(o) for o in fresh)
+        if len(active) > 250:
+            # The tangent graph is quadratic in the wrap-circle count; past this density a
+            # single call was measured in the tens of minutes. Declaring no-path is honest
+            # here: the caller treats it as this layer having no room and falls back.
+            raise NoPathFound("taut context too dense to price exactly")
 
+    if len(obstacles) > 250:
+        raise NoPathFound("taut context too dense to price exactly")
     return solve(start, goal, obstacles, boundary=boundary, boundary_gap=boundary_gap)
 
 
