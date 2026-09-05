@@ -1613,6 +1613,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        need=piece.width / 2.0 + piece.clearance
                                        + GUARDBAND_NM,
                                        clearance=piece.clearance,
+                                       net=piece.net.code,
                                        admit=1.85 if separation_strikes.get(
                                            piece.parent) else 2.0)
                     if not got.found:
@@ -1661,7 +1662,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     head = (float(probe.pad_a.x), float(probe.pad_a.y))
                     tail = (float(probe.pad_b.x), float(probe.pad_b.y))
                     trial = weave.insert(-1, head, tail, weave.mesh.terminals(*head),
-                                         weave.mesh.terminals(*tail), need=0.0)
+                                         weave.mesh.terminals(*tail), need=0.0,
+                                         net=probe.net.code)
                     if trial.found:
                         weave.remove(-1)
                         capacity_bound += 1
@@ -1806,7 +1808,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
                                        weave.mesh.terminals(*head),
                                        weave.mesh.terminals(*tail),
                                        need=piece.width / 2.0 + piece.clearance
-                                       + GUARDBAND_NM, clearance=piece.clearance)
+                                       + GUARDBAND_NM, clearance=piece.clearance,
+                                       net=piece.net.code)
                     if (got.found and weave.chain_length(head, tail, got.crossings)
                             < old_len - 10_000.0):
                         piece.route = Leg(layer=usable.index(piece.layer), start=head,

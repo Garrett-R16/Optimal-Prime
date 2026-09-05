@@ -57,7 +57,11 @@ class Weave:
         self.chords: dict[int, list[Chord]] = {}
         #: per portal key: committed crossings as (fraction, wire key), kept sorted
         self.on_portal: dict[tuple[int, int], list[tuple[float, int]]] = {}
-        self._cells: dict[int, TriangleCells] = {}
+        #: per (triangle, net-or-None): the cell partition; a net's own chords are not
+        #: walls to it, so a wire sees the partition with its net's chords left out
+        self._cells: dict = {}
+        #: per wire: its net, so copper that may touch is never a wall
+        self.net_of: dict[int, int] = {}
         self._corners: dict[int, list[tuple[float, float]]] = {}
         self._edge_of: dict[int, dict[tuple[int, int], tuple[int, bool]]] = {}
         #: per wire: the half-pitch it needs at a doorway (half width + clearance)
@@ -82,12 +86,27 @@ class Weave:
             self._corners[tri] = got
         return got
 
-    def cells(self, tri: int) -> TriangleCells:
-        got = self._cells.get(tri)
+    def cells(self, tri: int, net=None) -> TriangleCells:
+        """The triangle's cells as one wire sees them: chords of its own net are air.
+
+        Same-net copper may touch, and a net's earlier wires walling its later ones was
+        measured as the majority of all weave separations on the 630-pad board (73 of
+        119 walled in by chords, against 46 short of capacity).
+        """
+        chords = self.chords.get(tri, [])
+        if net is not None and not any(self.net_of.get(c.key) == net for c in chords):
+            net = None
+        slot = (tri, net)
+        got = self._cells.get(slot)
         if got is None:
-            got = TriangleCells.build(self.chords.get(tri, []))
-            self._cells[tri] = got
+            keep = [c for c in chords if net is None or self.net_of.get(c.key) != net]
+            got = TriangleCells.build(keep)
+            self._cells[slot] = got
         return got
+
+    def _forget_cells(self, tri: int) -> None:
+        for slot in [slot for slot in self._cells if slot[0] == tri]:
+            del self._cells[slot]
 
     def _edges(self, tri: int) -> dict[tuple[int, int], tuple[int, bool]]:
         """Portal key -> (edge index, whether the key's a-vertex is the edge's start)."""
@@ -116,7 +135,7 @@ class Weave:
 
     # ------------------------------------------------------------------ terminals
 
-    def terminal_cells(self, tri: int, x: float, y: float) -> list[int]:
+    def terminal_cells(self, tri: int, x: float, y: float, net=None) -> list[int]:
         """The sectors of ``tri`` a wire anchored at (x, y) may leave by.
 
         For a pad terminal the anchor sits on copper that owns one or more of the
@@ -125,7 +144,7 @@ class Weave:
         is simply the cell of the nearest boundary point.
         """
         vertices = [int(v) for v in self.mesh.triangles[tri]]
-        cells = self.cells(tri)
+        cells = self.cells(tri, net)
         owner = self._owner_at(x, y)
         out: list[int] = []
         if owner is not None:
@@ -145,7 +164,8 @@ class Weave:
                 return index
         return None
 
-    def _anchor_param(self, tri: int, x: float, y: float, cell: int) -> float:
+    def _anchor_param(self, tri: int, x: float, y: float, cell: int,
+                      net=None) -> float:
         """Where on ``tri``'s boundary the stub chord for this terminal anchors.
 
         The anchor must lie *in the given sector*: for a pad owning a corner that is the
@@ -153,7 +173,7 @@ class Weave:
         boundary point.
         """
         vertices = [int(v) for v in self.mesh.triangles[tri]]
-        cells = self.cells(tri)
+        cells = self.cells(tri, net)
         owner = self._owner_at(x, y)
         if owner is not None:
             for corner, vertex in enumerate(vertices):
@@ -170,7 +190,8 @@ class Weave:
     def insert(self, key: int, start: tuple[float, float], goal: tuple[float, float],
                start_tris: list[int], goal_tris: list[int], need: float = 0.0,
                node_limit: int = 200_000,
-               admit: float = 2.0, clearance: float = 0.0) -> WeaveResult:
+               admit: float = 2.0, clearance: float = 0.0,
+               net=None) -> WeaveResult:
         """Route one wire through the committed board and commit it.
 
         Dijkstra over *(triangle, cell)*; a transition exists only where an uncrossed lane
@@ -179,14 +200,16 @@ class Weave:
         through each triangle becomes a chord.
         """
         result = WeaveResult(key=key)
+        if net is not None:
+            self.net_of[key] = net
 
         starts: dict[tuple[int, int], float] = {}
         for tri in start_tris:
-            for cell in self.terminal_cells(tri, start[0], start[1]):
+            for cell in self.terminal_cells(tri, start[0], start[1], net):
                 starts[(tri, cell)] = 0.0
         goals: set[tuple[int, int]] = set()
         for tri in goal_tris:
-            for cell in self.terminal_cells(tri, goal[0], goal[1]):
+            for cell in self.terminal_cells(tri, goal[0], goal[1], net):
                 goals.add((tri, cell))
         if not starts or not goals:
             return result
@@ -216,7 +239,7 @@ class Weave:
                 return result
 
             tri, cell = state
-            cells = self.cells(tri)
+            cells = self.cells(tri, net)
             px, py = where[state]
             for other, portal in self.mesh.adjacent(tri):
                 pkey = portal.key()
@@ -249,7 +272,7 @@ class Weave:
                     lane_mid = (lane_from + lane_to) / 2.0 if want is None else                         min(max(want, lane_from + margin), lane_to - margin)
                     if cells.cell_at(self.portal_param(tri, pkey, lane_mid)) != cell:
                         continue
-                    over = self.cells(other).cell_at(
+                    over = self.cells(other, net).cell_at(
                         self.portal_param(other, pkey, lane_mid))
                     nxt = (other, over)
                     mx, my = self._lane_point(pkey, lane_mid)
@@ -279,7 +302,7 @@ class Weave:
         self.need_of[key] = need
         self.clr_of[key] = clearance
         self._results[key] = result
-        self._commit(key, start, goal, cursor, final, result)
+        self._commit(key, start, goal, cursor, final, result, net)
         for pkey, _ in result.crossings:
             self._reseat(pkey)
         result.crossings = [(pkey, self._fraction_of(pkey, key))
@@ -307,7 +330,7 @@ class Weave:
                 float(pa[1]) + (float(pb[1]) - float(pa[1])) * fraction)
 
     def _commit(self, key: int, start, goal, first_state, final_state,
-                result: WeaveResult) -> None:
+                result: WeaveResult, net=None) -> None:
         """Write the wire into the board: portal records, and a chord per triangle."""
         for pkey, fraction in result.crossings:
             records = self.on_portal.setdefault(pkey, [])
@@ -333,13 +356,13 @@ class Weave:
                         if index < len(result.crossings) else None)
             if entry is None:
                 cell = first_state[1] if index == 0 else 0
-                entry = self._anchor_param(tri, start[0], start[1], cell)
+                entry = self._anchor_param(tri, start[0], start[1], cell, net)
             if exit_ is None:
                 cell = final_state[1]
-                exit_ = self._anchor_param(tri, goal[0], goal[1], cell)
+                exit_ = self._anchor_param(tri, goal[0], goal[1], cell, net)
             self.chords.setdefault(tri, []).append(Chord(entry, exit_, key))
             self._chord_ends[(tri, key)] = (pkey_in, pkey_out)
-            self._cells.pop(tri, None)
+            self._forget_cells(tri)
 
     # ------------------------------------------------------------------ rank seating
 
@@ -415,7 +438,7 @@ class Weave:
                     t2 = self.portal_param(tri, pkey, self._fraction_of(pkey, chord.key))
                 fresh.append(Chord(t1, t2, chord.key))
             self.chords[tri] = fresh
-            self._cells.pop(tri, None)
+            self._forget_cells(tri)
 
     # ------------------------------------------------------------------ revision
 
@@ -435,7 +458,7 @@ class Weave:
             kept = [chord for chord in self.chords[tri] if chord.key != key]
             if len(kept) != len(self.chords[tri]):
                 self.chords[tri] = kept
-                self._cells.pop(tri, None)
+                self._forget_cells(tri)
         touched = []
         for pkey in list(self.on_portal):
             before = len(self.on_portal[pkey])
@@ -453,7 +476,7 @@ class Weave:
         chords, records, ends = snapshot
         for tri, chord in chords:
             self.chords.setdefault(tri, []).append(chord)
-            self._cells.pop(tri, None)
+            self._forget_cells(tri)
         for (tri, wire), portals in ends:
             self._chord_ends[(tri, wire)] = portals
         for pkey, fraction in records:
