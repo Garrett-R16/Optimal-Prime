@@ -1345,9 +1345,14 @@ def _stitch_pour_pads(board: Board, result: RouteResult, poured: list,
     return stitched, missed
 
 
+def _in_region(pad, region) -> bool:
+    x0, y0, x1, y1 = region
+    return x0 * 1e6 <= pad.x <= x1 * 1e6 and y0 * 1e6 <= pad.y <= y1 * 1e6
+
+
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
-               pour_nets=(),
+               pour_nets=(), region=None,
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1374,6 +1379,12 @@ def plan_board(board: Board, layers: list[str] | None = None,
         width = float(netclass.track_width_nm)
         clearance = netclass.clearance_nm * (1.0 + CLEARANCE_MARGIN)
         for a, b in _mst_edges(pads):
+            # A region proxy: route only the connections whose pads both lie inside
+            # the box, against the whole board's copper. The hard part of a board is a
+            # tenth of it, and an experiment on that tenth costs minutes, not a day.
+            if region is not None and not (_in_region(pads[a], region)
+                                           and _in_region(pads[b], region)):
+                continue
             links.append(_Link(
                 key=len(links), net=net, pad_a=pads[a], pad_b=pads[b],
                 span=math.dist((pads[a].x, pads[a].y), (pads[b].x, pads[b].y)),
@@ -2409,7 +2420,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             print(f"  {len(stranded)} stranded after settling; "
                   f"re-running in ban mode")
         return plan_board(board, layers=layers, rounds=rounds, verbose=verbose,
-                          _frozen_movers=frozenset({("off",)}), _veto_depth=1)
+                          region=region, _frozen_movers=frozenset({("off",)}), _veto_depth=1)
 
     # ---- shorten what the whole board can spare ----------------------------------------
     #
