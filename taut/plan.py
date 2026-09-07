@@ -1352,7 +1352,7 @@ def _in_region(pad, region) -> bool:
 
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
-               pour_nets=(), region=None,
+               pour_nets=(), region=None, stop_after_weave: bool = False,
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1866,6 +1866,15 @@ def plan_board(board: Board, layers: list[str] | None = None,
         else:
             _rebuild_pieces()
 
+    if stop_after_weave:
+        # An experiment on the weave needs only the weave's verdict; placement's exact
+        # solver would cost forty minutes to confirm what the outlaw count already says.
+        result.stats.update({"connections": len(links), "routed": 0,
+                             **{f"topo_{k}": v for k, v in sketch_stats.items()},
+                             "topo_weave_outlaws": len(outlaws),
+                             "topo_woven": sum(1 for p in pieces
+                                               if p.parent not in outlaws)})
+        return result
     sketch_round_cap = _SKETCH_ROUNDS if len(links) <= 150 else 1
     for _sketch_round in range(sketch_round_cap):
         sketch_stats["sketch_rounds"] += 1
