@@ -1353,7 +1353,7 @@ def _in_region(pad, region) -> bool:
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
                pour_nets=(), region=None, stop_after_weave: bool = False,
-               price_crossings: bool = False,
+               price_crossings: bool = False, via_cost: float | None = None,
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1530,10 +1530,11 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # so the route that pays for a crossing is the one that would have woven later.
     priority = {link.key: rank for rank, link in enumerate(
         sorted(links, key=lambda l: (-l.width, l.span)))}
+    stack_kwargs = {} if via_cost is None else {"via_cost": float(via_cost)}
     chosen, stack_report = route_stack(
         [meshes[layer] for layer in usable], sites, requests,
         terminals=terminals, rounds=rounds, verbose=verbose,
-        price_crossings=price_crossings, priority=priority)
+        price_crossings=price_crossings, priority=priority, **stack_kwargs)
     resolved: dict[int, list] = {}
     boundary_of = _board_boundary(board)
 
@@ -1593,6 +1594,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         turn_bans: dict[int, set] = {}
         #: connections whose layer preference the weave flipped after a walled separation
         flipped: dict[int, int] = {}
+        _dumped_walls: list = []
         #: outlaws: connections proven unweavable after every rung of the ladder --
         #: they keep their stack routes and take their chances with the tiers below.
         separation_strikes: dict[int, int] = {}
@@ -1694,6 +1696,34 @@ def plan_board(board: Board, layers: list[str] | None = None,
             if verbose and separations:
                 print(f"  weave: {len(separations)} separation(s): {capacity_bound} "
                       f"capacity-bound, {len(walled_pieces)} walled in by chords")
+            if region is not None and walled_pieces and not _dumped_walls:
+                # One picture of the first batch: every committed corridor on each
+                # layer, and the walled pieces' endpoints, so the walls can be SEEN.
+                import json as _json
+                _dumped_walls.append(True)
+                dump = {"region": list(region), "layers": {}, "walled": [], "pads": []}
+                for layer, weave in weaves.items():
+                    rows = []
+                    for wkey, live in weave._results.items():
+                        if not live.found:
+                            continue
+                        pts = [list(weave._lane_point(k, f)) for k, f in live.crossings]
+                        rows.append({"key": wkey, "net": weave.net_of.get(wkey, -1),
+                                     "points": pts})
+                    dump["layers"][layer] = rows
+                for probe in separations:
+                    if id(probe) in walled_pieces:
+                        dump["walled"].append({"net": probe.net.name, "layer": probe.layer,
+                                               "a": [probe.pad_a.x, probe.pad_a.y],
+                                               "b": [probe.pad_b.x, probe.pad_b.y]})
+                for pad in board.pads:
+                    if _in_region(pad, region):
+                        dump["pads"].append([pad.x, pad.y, pad.size_x, pad.size_y,
+                                             pad.net, list(pad.layers)])
+                with open("walls_dump.json", "w", encoding="utf-8") as fh:
+                    _json.dump(dump, fh)
+                if verbose:
+                    print(f"  weave: wrote walls_dump.json ({len(dump['walled'])} walled)")
             # Endgame discipline: a connection on its third separation has had a site
             # ban, a gift, and a subsidised re-deal -- more rounds were measured to be
             # whack-a-mole (1,216 separations and climbing on the 630-pad board). It
