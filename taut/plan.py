@@ -2409,7 +2409,10 @@ def plan_board(board: Board, layers: list[str] | None = None,
     # response is not cleverer blame but a guarantee: if anyone is stranded, the whole
     # pipeline runs once more with arbitration off. A complete board outranks a shorter
     # one, always; the arbitration is kept exactly where it keeps everyone housed.
-    if stranded and _veto_depth == 0 and not _frozen_movers and len(links) <= 150:
+    # The ban-mode rerun is the small-board tier; a region proxy mirrors the full board
+    # it stands in for, which never takes it.
+    if (stranded and _veto_depth == 0 and not _frozen_movers and len(links) <= 150
+            and region is None):
         if verbose:
             for link in stranded:
                 print(f"  stranded: net {link.net.name} span {link.span / 1e6:.2f} mm "
@@ -2429,7 +2432,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
             print(f"  {len(stranded)} stranded after settling; "
                   f"re-running in ban mode")
         return plan_board(board, layers=layers, rounds=rounds, verbose=verbose,
-                          region=region, _frozen_movers=frozenset({("off",)}), _veto_depth=1)
+                          pour_nets=pour_nets, region=region,
+                          _frozen_movers=frozenset({("off",)}), _veto_depth=1)
 
     # ---- shorten what the whole board can spare ----------------------------------------
     #
