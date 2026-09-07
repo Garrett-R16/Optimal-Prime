@@ -1924,6 +1924,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
             sketch_stats["woven"] = sum(1 for piece in pieces
                                         if piece.parent not in outlaws)
             sketch_stats["weave_outlaws"] = len(outlaws)
+            result.stats["outlaw_keys"] = sorted(outlaws)
             if verbose and outlaws:
                 names = sorted({by_route[k].net.name for k in outlaws})
                 print(f"  weave: complete around {len(outlaws)} outlaw(s): "
@@ -2588,6 +2589,7 @@ def plan_board(board: Board, layers: list[str] | None = None,
         excuse = next((link.reason for link in links
                        if link.parent == owner and link.reason), "no legal geometry")
         result.failed.append((parent.net.code, parent.net.name, excuse))
+        result.stats.setdefault("failed_keys", []).append(owner)
 
     for link in links:
         if not link.elements or not whole.get(link.parent):
