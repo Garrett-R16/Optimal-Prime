@@ -1353,6 +1353,7 @@ def _in_region(pad, region) -> bool:
 def plan_board(board: Board, layers: list[str] | None = None,
                rounds: int = 12, verbose: bool = False,
                pour_nets=(), region=None, stop_after_weave: bool = False,
+               price_crossings: bool = False,
                _frozen_movers: frozenset = frozenset(),
                _veto_depth: int = 0) -> RouteResult:
     """Route a board topology-first."""
@@ -1525,9 +1526,14 @@ def plan_board(board: Board, layers: list[str] | None = None,
 
     ban_mode = ("off",) in _frozen_movers
     bans: set = set()
+    # priority: the weave's insertion order -- widest first, shortest within a width --
+    # so the route that pays for a crossing is the one that would have woven later.
+    priority = {link.key: rank for rank, link in enumerate(
+        sorted(links, key=lambda l: (-l.width, l.span)))}
     chosen, stack_report = route_stack(
         [meshes[layer] for layer in usable], sites, requests,
-        terminals=terminals, rounds=rounds, verbose=verbose)
+        terminals=terminals, rounds=rounds, verbose=verbose,
+        price_crossings=price_crossings, priority=priority)
     resolved: dict[int, list] = {}
     boundary_of = _board_boundary(board)
 

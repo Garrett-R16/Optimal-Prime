@@ -410,7 +410,8 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                 bans: frozenset = frozenset(), warm: list | None = None,
                 only: set | None = None, avoid_for: dict | None = None,
                 veto_for: dict | None = None, site_veto_for: dict | None = None,
-                turn_veto_for: dict | None = None, verbose: bool = False):
+                turn_veto_for: dict | None = None, verbose: bool = False,
+                price_crossings: bool = False, priority: dict | None = None):
     """Choose a route for every connection at once, over the whole stack.
 
     ``requests`` are ``(key, net, start, goal, preferred_layer?)``; ``terminals(point)``
@@ -512,7 +513,16 @@ def route_stack(meshes: list[Mesh], sites: list[Site], requests, *,
                   f"{len(overfull)} resources over capacity, "
                   f"{len(tangled)} pairs crossing")
 
-        if not overfull:
+        if price_crossings and tangled:
+            # A crossing IS a contested resource -- what a via is for. Charging both
+            # routes ping-ponged (5, 5, 4, 4, 6 on ecc83-pp); charging one, chosen by a
+            # stable priority (the weave's own order: widest first, then shortest), makes
+            # the same route pay every round until a via is cheaper than the detour.
+            rank = priority or {}
+            for route_a, route_b, where in tangled:
+                loser = route_b if rank.get(route_b.key, 0) >= rank.get(route_a.key, 0)                     else route_a
+                _blame(meshes, loser, where, history)
+        if not overfull and not (price_crossings and tangled):
             report.converged = True
             break
         for resource in overfull:
