@@ -2590,6 +2590,13 @@ def plan_board(board: Board, layers: list[str] | None = None,
                        if link.parent == owner and link.reason), "no legal geometry")
         result.failed.append((parent.net.code, parent.net.name, excuse))
         result.stats.setdefault("failed_keys", []).append(owner)
+        result.stats.setdefault("failed_detail", []).append((owner, parent.net.name, [
+            (link.layer, isinstance(link.pad_a, _ViaPoint),
+             (round(link.pad_a.x / 1e6, 2), round(link.pad_a.y / 1e6, 2)),
+             isinstance(link.pad_b, _ViaPoint),
+             (round(link.pad_b.x / 1e6, 2), round(link.pad_b.y / 1e6, 2)),
+             bool(link.elements), link.reason)
+            for link in links if link.parent == owner]))
 
     for link in links:
         if not link.elements or not whole.get(link.parent):
