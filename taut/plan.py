@@ -44,6 +44,7 @@ from .route import (ArcTrack, Pour, RouteResult, Track, Via, _board_boundary, _c
 from .tangent import (NoPathFound, PathArc, PathLine, TautPath,
                       segment_to_obstacle)
 from .tangent import violated_obstacles
+from .escape import escape_route
 from .layered import Leg, route_stack
 from .weave import Weave
 from .topo import Route
@@ -1592,6 +1593,8 @@ def plan_board(board: Board, layers: list[str] | None = None,
         site_vetoes: dict[int, set[int]] = {}
         pocket_gifted: set[int] = set()
         turn_bans: dict[int, set] = {}
+        #: connections the weave has re-searched for an escape of its own
+        escaped: set[int] = set()
         #: connections whose layer preference the weave flipped after a walled separation
         flipped: dict[int, int] = {}
         _dumped_walls: list = []
@@ -1730,8 +1733,31 @@ def plan_board(board: Board, layers: list[str] | None = None,
             # is outlawed, and the last feedback rounds outlaw every straggler so the
             # weave completes around them rather than standing the whole board down.
             closing = _feedback >= _WEAVE_VETOES - 2
+            escaped_now = 0
             for separated in separations:
                 key = separated.parent
+                # First rung: the weave places its own escape vias. The stack deals vias
+                # blind to the walls; here the connection is re-searched on the live weave
+                # of both layers -- pad to a via beside it, across on the other layer, up
+                # beside the far pad -- and a route it returns is one the weave has
+                # already held. The stack is handed it as a route of its own kind.
+                if key not in escaped:
+                    escaped.add(key)
+                    parent = by_route[key]
+                    gifts = _pocket_sites(board, meshes, usable, polygon, parent,
+                                          len(sites), via_radius + clearance)
+                    sites.extend(gifts)
+                    taken = {index for route in chosen if route.key != key
+                             for index in route.vias}
+                    dive = escape_route(weaves, usable, sites, parent,
+                                        separated.width / 2.0 + separated.clearance
+                                        + GUARDBAND_NM, separated.clearance, 2.0,
+                                        taken, gifts)
+                    if dive is not None:
+                        chosen = [dive if route.key == key else route
+                                  for route in chosen]
+                        escaped_now += 1
+                        continue
                 separation_strikes[key] = separation_strikes.get(key, 0) + 1
                 if closing or separation_strikes[key] >= 3:
                     outlaws.add(key)
@@ -1819,6 +1845,9 @@ def plan_board(board: Board, layers: list[str] | None = None,
                     if verbose:
                         print(f"  weave: net {separated.net.name} separated on "
                               f"{separated.layer}; vetoing that layer and re-dealing")
+            if verbose and escaped_now:
+                print(f"  weave: {escaped_now} connection(s) escaped through their own "
+                      f"vias; re-weaving")
             if not keys:
                 continue
             # Separated connections get their vias subsidised: the standard price
