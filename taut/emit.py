@@ -66,6 +66,44 @@ def _segment_node(track: Track, uuid: str) -> Node:
     ]
 
 
+def _via_node(via, layers: tuple[str, ...], uuid: str) -> Node:
+    """A through via, named by the outermost copper layers it joins."""
+    return [
+        sym("via"),
+        [sym("at"), num(nm_to_mm(via.x)), num(nm_to_mm(via.y))],
+        [sym("size"), num(nm_to_mm(via.diameter_nm))],
+        [sym("drill"), num(nm_to_mm(via.drill_nm))],
+        [sym("layers"), quoted(layers[0]), quoted(layers[-1])],
+        [sym("net"), num(via.net)],
+        [sym("uuid"), quoted(uuid)],
+    ]
+
+
+def _zone_node(pour, uuid: str) -> Node:
+    """A copper zone for a poured net, unfilled.
+
+    ``kicad-cli`` cannot fill zones, so the fill happens on first open in KiCad (press B).
+    Until then DRC counts the poured net's pads as unconnected -- that is the tool's
+    limitation, not the board's state, and the caller reports it as such.
+    """
+    points = [[sym("xy"), num(nm_to_mm(x)), num(nm_to_mm(y))] for x, y in pour.polygon]
+    return [
+        sym("zone"),
+        [sym("net"), num(pour.net)],
+        [sym("net_name"), quoted(pour.name)],
+        [sym("layer"), quoted(pour.layer)],
+        [sym("uuid"), quoted(uuid)],
+        [sym("name"), quoted("")],
+        [sym("hatch"), sym("edge"), num(0.5)],
+        [sym("connect_pads"), [sym("clearance"), num(0.3)]],
+        [sym("min_thickness"), num(0.25)],
+        [sym("filled_areas_thickness"), sym("no")],
+        [sym("fill"), sym("yes"),
+         [sym("thermal_gap"), num(0.5)], [sym("thermal_bridge_width"), num(0.5)]],
+        [sym("polygon"), [sym("pts")] + points],
+    ]
+
+
 def _arc_node(track: ArcTrack, uuid: str) -> Node:
     return [
         sym("arc"),
@@ -87,6 +125,12 @@ def emit(board: Board, result: RouteResult, seed: str = "taut") -> str:
         uuid = _uuid(seed, index)
         tree.append(_arc_node(track, uuid) if isinstance(track, ArcTrack)
                     else _segment_node(track, uuid))
+
+    copper = tuple(board.copper_layers)
+    for index, via in enumerate(result.vias):
+        tree.append(_via_node(via, copper, _uuid(seed, len(result.tracks) + index)))
+    for index, pour in enumerate(getattr(result, "pours", []) or []):
+        tree.append(_zone_node(pour, _uuid(seed, 1_000_000 + index)))
     return sexpr.dumps(tree)
 
 

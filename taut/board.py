@@ -228,8 +228,34 @@ def _pads(tree: Node) -> list[Pad]:
 
 
 def _edges(tree: Node) -> list[Edge]:
-    """Every Edge.Cuts graphic, reduced to segments and arcs."""
+    """Every Edge.Cuts graphic, reduced to segments and arcs.
+
+    The outline is wherever the designer drew it: usually loose ``gr_*`` graphics, but on
+    plenty of real boards it lives as ``fp_line``s inside a border footprint, with
+    coordinates in the footprint's own rotated frame. Both spellings are the same edges.
+    """
     out: list[Edge] = []
+
+    # A plain list cannot carry an attribute, so ownership is tracked by identity: every
+    # node inside a footprint maps to that footprint's placement.
+    placement_of: dict[int, tuple] = {}
+    for footprint in sexpr.find_all(tree, "footprint"):
+        at = _numbers(sexpr.find(footprint, "at"))
+        if len(at) < 2:
+            continue
+        placement = (mm_to_nm(at[0]), mm_to_nm(at[1]), at[2] if len(at) > 2 else 0.0)
+        for node in sexpr.walk(footprint):
+            if isinstance(node, list):
+                placement_of[id(node)] = placement
+
+    def moved(x: float, y: float, node) -> tuple[int, int]:
+        placement = placement_of.get(id(node))
+        if placement is None:
+            return mm_to_nm(x), mm_to_nm(y)
+        fx, fy, angle = placement
+        rx, ry = _rotate(mm_to_nm(x), mm_to_nm(y), angle)
+        return int(fx + rx), int(fy + ry)
+
     for node in sexpr.walk(tree):
         layer = sexpr.find(node, "layer")
         if layer is None or len(layer) < 2 or not isinstance(layer[1], Atom):
@@ -237,35 +263,37 @@ def _edges(tree: Node) -> list[Edge]:
         if layer[1].text != "Edge.Cuts":
             continue
         kind = sexpr.head(node)
+        if kind and kind.startswith("fp_"):
+            kind = "gr_" + kind[3:]
         start = _numbers(sexpr.find(node, "start"))
         end = _numbers(sexpr.find(node, "end"))
         if kind == "gr_line" and len(start) >= 2 and len(end) >= 2:
-            out.append(Edge("segment", mm_to_nm(start[0]), mm_to_nm(start[1]),
-                            mm_to_nm(end[0]), mm_to_nm(end[1])))
+            out.append(Edge("segment", *moved(start[0], start[1], node),
+                            *moved(end[0], end[1], node)))
         elif kind == "gr_arc":
             mid = _numbers(sexpr.find(node, "mid"))
             if len(start) >= 2 and len(mid) >= 2 and len(end) >= 2:
-                out.append(Edge("arc", mm_to_nm(start[0]), mm_to_nm(start[1]),
-                                mm_to_nm(end[0]), mm_to_nm(end[1]),
-                                mm_to_nm(mid[0]), mm_to_nm(mid[1])))
+                out.append(Edge("arc", *moved(start[0], start[1], node),
+                                *moved(end[0], end[1], node),
+                                *moved(mid[0], mid[1], node)))
         elif kind == "gr_rect" and len(start) >= 2 and len(end) >= 2:
-            x0, y0 = mm_to_nm(start[0]), mm_to_nm(start[1])
-            x1, y1 = mm_to_nm(end[0]), mm_to_nm(end[1])
+            x0, y0 = moved(start[0], start[1], node)
+            x1, y1 = moved(end[0], end[1], node)
             corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
             for i in range(4):
                 out.append(Edge("segment", *corners[i], *corners[(i + 1) % 4]))
         elif kind == "gr_circle":
             centre = _numbers(sexpr.find(node, "center"))
             if len(centre) >= 2 and len(end) >= 2:
-                cx, cy = mm_to_nm(centre[0]), mm_to_nm(centre[1])
-                radius = int(math.dist((cx, cy), (mm_to_nm(end[0]), mm_to_nm(end[1]))))
+                cx, cy = moved(centre[0], centre[1], node)
+                radius = int(math.dist((cx, cy), moved(end[0], end[1], node)))
                 out.append(Edge("arc", cx - radius, cy, cx + radius, cy, cx, cy - radius))
                 out.append(Edge("arc", cx + radius, cy, cx - radius, cy, cx, cy + radius))
         elif kind == "gr_poly":
             pts = sexpr.find(node, "pts")
             if pts is None:
                 continue
-            points = [tuple(mm_to_nm(v) for v in _numbers(pt)[:2])
+            points = [moved(*_numbers(pt)[:2], node)
                       for pt in sexpr.find_all(pts, "xy") if len(_numbers(pt)) >= 2]
             for i in range(len(points)):
                 out.append(Edge("segment", *points[i], *points[(i + 1) % len(points)]))
